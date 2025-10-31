@@ -26,7 +26,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         // Create database for WordPress site
         let db_name = format!("wp_{}", site_name.replace('.', "_").replace('-', "_"));
         
-        match db::create_wordpress_database(&db_name) {
+        match db::create_wordpress_database(&db_name, false) {
             Ok(db_name) => println!("✓ Database created successfully: {}", db_name),
             Err(e) => {
                 eprintln!("✗ Failed to create database: {}", e);

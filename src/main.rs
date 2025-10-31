@@ -2,9 +2,9 @@
 // It sets up the command-line interface and handles the execution of commands based on user input.
 
 mod cli;
-mod nginx;
-mod utils;
-
+pub mod nginx;
+pub mod utils;
+pub mod constants;
 // use cli::commands::{spawn_site, delete_site, deactivate_site, activate_site, update_site};
 use cli::commands::{spawn_site, delete_site};
 
