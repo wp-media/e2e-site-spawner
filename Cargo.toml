@@ -1,0 +1,18 @@
+[package]
+name = "e2e-site-spawner"
+version = "0.1.0"
+authors = ["Sandy Figueroa <sandy@wp-media.me>"]
+edition = "2024"
+
+[[bin]]
+name = "e2sp"
+path = "src/main.rs"
+
+# Dependencies
+[dependencies]
+clap = { version = "4.5.51", features = ["derive"] }
+# colored = "3.0.0"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.0"
