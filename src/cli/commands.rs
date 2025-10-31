@@ -5,6 +5,8 @@
 /// serves as a placeholder for future implementation and prints
 /// a description of its intended effect.
 
+use crate::utils::db;
+
 /// Spawns a new site with the given name.
 ///
 /// # Arguments
@@ -14,11 +16,24 @@
 /// * `no_wp` - Optional flag to create the site without WordPress.
 pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
     println!("Preparing to create site: {}", site_name);
+    
     if ssl {
         println!("SSL will be enabled for this site.");
     }
     if no_wp {
         println!("WordPress will not be installed on this site.");
+    } else {
+        // Create database for WordPress site
+        let db_name = format!("wp_{}", site_name.replace('.', "_").replace('-', "_"));
+        
+        match db::create_wordpress_database(&db_name) {
+            Ok(db_name) => println!("✓ Database created successfully: {}", db_name),
+            Err(e) => {
+                eprintln!("✗ Failed to create database: {}", e);
+                // Handle error appropriately
+                return;
+            }
+        }
     }
     // Future implementation goes here
 }
@@ -30,7 +45,12 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
 /// * `site_name` - The name of the site to delete.
 pub fn delete_site(site_name: &str) {
     println!("Preparing to delete site: {}", site_name);
-    // Future implementation goes here
+    // TODO: Get the actual database name associated with the site
+    let db_name = format!("wp_{}", site_name.replace('.', "_").replace('-', "_"));
+    match db::drop_database(&db_name) {
+        Ok(()) => println!("✓ Database deleted successfully: {}", db_name),
+        Err(e) => eprintln!("✗ Failed to delete database: {}", e),
+    }
 }
 
 // /// Deactivates the specified site.

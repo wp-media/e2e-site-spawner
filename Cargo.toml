@@ -11,6 +11,7 @@ path = "src/main.rs"
 # Dependencies
 [dependencies]
 clap = { version = "4.5.51", features = ["derive"] }
+mysql = "26.0.1"
 # colored = "3.0.0"
 
 [dev-dependencies]
