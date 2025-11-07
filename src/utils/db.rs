@@ -271,7 +271,9 @@ pub fn database_exists(db_name: &str, conn: Option<&mut Conn>) -> Result<bool, D
 
     Ok(!result.is_empty())
 }
-
+pub fn create_db_name(site_name: &str) -> String {
+    format!("wp_{}", site_name.replace('.', "_").replace('-', "_"))
+}
 // use std::time::Duration;
 
 #[cfg(test)]

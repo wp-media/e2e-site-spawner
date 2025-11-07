@@ -12,8 +12,10 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.5.51", features = ["derive"] }
 mysql = "26.0.1"
-# colored = "3.0.0"
+colored = "3.0.0"  # For colored terminal output
+libc = "0.2.177"     # For Unix system calls
 
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.0"
+tempfile = "3.23.0"
