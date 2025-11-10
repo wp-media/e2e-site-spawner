@@ -8,6 +8,7 @@ use crate::constants::{NGINX_HTTP_TEMPLATE, NGINX_HTTPS_TEMPLATE};
 ///
 /// Future implementation will include functions to read, write, and validate Nginx configurations.
 use std::path::Path;
+use std::process::Command;
 
 /// Represents the protocol type for the Nginx configuration
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -61,6 +62,7 @@ impl NginxConfig {
     ///
     /// A Result indicating success or failure of validation.
     pub fn validate(&self) -> Result<(), String> {
+        // TODO: Do all confirmations (if possible) and concatenate errors to return all at once, so, all issues can be fixed at once.
         // 1. Validate site name (domain name validation)
         if !crate::utils::validators::validate_site_name(&self.site_name) {
             return Err(format!("Invalid site name: {}", self.site_name));
@@ -115,17 +117,24 @@ impl NginxConfig {
 
     /// Generates the Nginx configuration file content from templates.
     ///
-    /// This function combines HTTP and optionally HTTPS templates based on whether
-    /// SSL is configured, then replaces placeholder values with actual configuration values.
+    /// This function takes a template (HTTP or HTTPS) based on the specified protocol
+    /// and replaces placeholder values with actual configuration values.
     /// The placeholders follow the pattern `!{{VALUE_NAME}}!` where VALUE_NAME can be:
     /// - `site_name`: Replaced with the site's domain name
     /// - `site_path`: Replaced with the site's root directory path  
-    /// - `ssl_path`: Replaced with the SSL certificate directory path (only when SSL is enabled)
+    /// - `ssl_path`: Replaced with the SSL certificate directory path (HTTPS only)
+    ///
+    /// # Arguments
+    ///
+    /// * `protocol` - The protocol type (HTTP or HTTPS) that determines which template to use
     ///
     /// # Returns
     ///
     /// A string containing the complete Nginx configuration with all placeholders replaced.
-    /// If SSL is configured, both HTTP and HTTPS server blocks are included.
+    ///
+    /// # Panics
+    ///
+    /// Panics if HTTPS protocol is specified but `ssl_root` is None.
     ///
     /// # Examples
     ///
@@ -137,16 +146,24 @@ impl NginxConfig {
     ///     Some("/etc/nginx/ssl".to_string())
     /// );
     /// 
-    /// // Generate configuration (includes both HTTP and HTTPS if SSL is set)
-    /// let nginx_config = config.generate_config();
-    /// assert!(nginx_config.contains("listen 80"));
-    /// assert!(nginx_config.contains("listen 443"));
+    /// // Generate HTTP configuration
+    /// let http_config = config.generate_config(NginxProtocol::Http);
+    /// assert!(http_config.contains("listen 80"));
+    /// 
+    /// // Generate HTTPS configuration
+    /// let https_config = config.generate_config(NginxProtocol::Https);
+    /// assert!(https_config.contains("listen 443"));
     /// ```
-    pub fn generate_config(&self) -> String {
-        let mut config = NGINX_HTTP_TEMPLATE.to_string();
-        if self.ssl_root.is_some() {
-            config = format!("{}\n\n{}", config, NGINX_HTTPS_TEMPLATE);
-        }
+    pub fn generate_config(&self, protocol: NginxProtocol) -> String {
+        let mut config = match protocol {
+            NginxProtocol::Http => NGINX_HTTP_TEMPLATE.to_string(),
+            NginxProtocol::Https => {
+                if self.ssl_root.is_none() {
+                    panic!("SSL path must be provided for HTTPS configuration");
+                }
+                NGINX_HTTPS_TEMPLATE.to_string()
+            }
+        };
         
         // Replace site_name placeholder
         config = config.replace("!{{site_name}}!", &self.site_name);
@@ -155,20 +172,109 @@ impl NginxConfig {
         config = config.replace("!{{site_path}}!", &self.root);
 
         // Replace ssl_path placeholder (only present in HTTPS template)
-        if let Some(ref ssl_path) = self.ssl_root {
-            config = config.replace("!{{ssl_path}}!", ssl_path);
+        if protocol == NginxProtocol::Https {
+            if let Some(ssl_path) = &self.ssl_root {
+                config = config.replace("!{{ssl_path}}!", ssl_path);
+            }
         }
 
         config
     }
 }
 
+/// Validates the current nginx configuration using `nginx -t`.
+///
+/// # Returns
+///
+/// * `Ok(())` - If the nginx configuration is valid
+/// * `Err(String)` - If the configuration is invalid, with nginx output
+///
+/// # Examples
+///
+/// ```
+/// match validate_nginx_configuration() {
+///     Ok(()) => println!("✓ Nginx configuration is valid"),
+///     Err(e) => eprintln!("{}", e),
+/// }
+/// ```
+pub fn validate_nginx_configuration() -> Result<(), String> {
+    // Execute nginx -t command
+    let output = Command::new("nginx")
+        .args(&["-t"])
+        .output()
+        .map_err(|e| {
+            format!("Failed to execute nginx: {}. Ensure nginx is installed and in PATH", e)
+        })?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        // Get the error output from nginx
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        
+        // Format a concise error message
+        Err(format!(
+            "Nginx configuration validation failed:\n{}",
+            stderr.trim()
+        ))
+    }
+}
+
+/// Validates a specific nginx configuration file.
+///
+/// # Arguments
+///
+/// * `config_path` - Path to the specific configuration file to validate
+///
+/// # Returns
+///
+/// * `Ok(())` - If the configuration file is valid
+/// * `Err(String)` - If invalid, with nginx error output
+pub fn validate_nginx_config_file(config_path: &str) -> Result<(), String> {
+    use std::fs;
+    
+    // Create a temporary main config that includes the target file
+    let temp_config = format!("/tmp/nginx_test_{}.conf", std::process::id());
+    let include_content = format!(
+        "events {{ worker_connections 1024; }}\nhttp {{ include {}; }}\n",
+        config_path
+    );
+    
+    // Write temporary config
+    fs::write(&temp_config, include_content)
+        .map_err(|e| format!("Failed to create temp config: {}", e))?;
+    
+    // Test with the temporary config
+    let output = Command::new("nginx")
+        .args(&["-t", "-c", &temp_config])
+        .output()
+        .map_err(|e| {
+            let _ = fs::remove_file(&temp_config);
+            format!("Failed to execute nginx: {}", e)
+        })?;
+    
+    // Clean up
+    let _ = fs::remove_file(&temp_config);
+    
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "Invalid configuration in '{}':\n{}",
+            config_path, 
+            stderr.trim()
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::{NGINX_HTTP_CONFIG_MARKER, NGINX_HTTPS_CONFIG_MARKER};
 
     #[test]
-    fn test_generate_config_http_only() {
+    fn test_generate_http_config() {
         let config = NginxConfig::new(
             "test.example.com".to_string(),
             "/var/www/html".to_string(),
@@ -176,20 +282,19 @@ mod tests {
             None,
         );
 
-        let generated = config.generate_config();
+        let generated = config.generate_config(NginxProtocol::Http);
 
-        // Verify HTTP template is included
-        assert!(generated.contains("### HTTP Server ###"));
+        // Verify HTTP template is used
+        assert!(generated.contains(NGINX_HTTP_CONFIG_MARKER));
         assert!(generated.contains("listen 80"));
         
-        // Verify HTTPS template is NOT included
-        assert!(!generated.contains("### HTTPS Server ###"));
+        // Verify HTTPS content is NOT included
+        assert!(!generated.contains(NGINX_HTTPS_CONFIG_MARKER));
         assert!(!generated.contains("listen 443"));
         
         // Verify placeholders are replaced
         assert!(!generated.contains("!{{site_name}}!"));
         assert!(!generated.contains("!{{site_path}}!"));
-        assert!(!generated.contains("!{{ssl_path}}!")); // Shouldn't exist in HTTP-only
         
         // Verify actual values are present
         assert!(generated.contains("test.example.com"));
@@ -197,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_config_with_ssl() {
+    fn test_generate_https_config() {
         let config = NginxConfig::new(
             "secure.example.com".to_string(),
             "/var/www/html".to_string(),
@@ -205,13 +310,15 @@ mod tests {
             Some("/etc/nginx/ssl".to_string()),
         );
 
-        let generated = config.generate_config();
+        let generated = config.generate_config(NginxProtocol::Https);
 
-        // Verify both HTTP and HTTPS templates are included
-        assert!(generated.contains("### HTTP Server ###"));
-        assert!(generated.contains("listen 80"));
-        assert!(generated.contains("### HTTPS Server ###"));
+        // Verify HTTPS template is used
+        assert!(generated.contains(NGINX_HTTPS_CONFIG_MARKER));
         assert!(generated.contains("listen 443"));
+        
+        // Verify HTTP content is NOT included
+        assert!(!generated.contains(NGINX_HTTP_CONFIG_MARKER));
+        assert!(!generated.contains("listen 80"));
         
         // Verify all placeholders are replaced
         assert!(!generated.contains("!{{site_name}}!"));
@@ -225,19 +332,38 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "SSL path must be provided for HTTPS configuration")]
+    fn test_https_without_ssl_path_panics() {
+        let config = NginxConfig::new(
+            "example.com".to_string(),
+            "/var/www/html".to_string(),
+            "/etc/nginx/conf.d".to_string(),
+            None,  // No SSL path
+        );
+
+        // This should panic
+        config.generate_config(NginxProtocol::Https);
+    }
+
+    #[test]
     fn test_generate_config_special_characters_in_name() {
         let config = NginxConfig::new(
             "my-site.sub.example.com".to_string(),
             "/var/www/html".to_string(),
             "/etc/nginx/conf.d".to_string(),
-            None,
+            Some("/etc/nginx/ssl".to_string()),
         );
 
-        let generated = config.generate_config();
+        let http_generated = config.generate_config(NginxProtocol::Http);
+        let https_generated = config.generate_config(NginxProtocol::Https);
         
-        // Verify domain with hyphens and subdomains is correctly replaced
-        assert!(generated.contains("my-site.sub.example.com"));
-        assert!(generated.contains("/var/www/html/my-site.sub.example.com"));
+        // Verify domain with hyphens and subdomains is correctly replaced in both
+        assert!(http_generated.contains("my-site.sub.example.com"));
+        assert!(http_generated.contains("/var/www/html/my-site.sub.example.com"));
+        
+        assert!(https_generated.contains("my-site.sub.example.com"));
+        assert!(https_generated.contains("/var/www/html/my-site.sub.example.com"));
+        assert!(https_generated.contains("/etc/nginx/ssl/my-site.sub.example.com"));
     }
 
     #[test]
@@ -249,36 +375,62 @@ mod tests {
             Some("/custom/ssl".to_string()),
         );
 
-        let generated = config.generate_config();
+        let http_generated = config.generate_config(NginxProtocol::Http);
+        let https_generated = config.generate_config(NginxProtocol::Https);
 
-        // Ensure no unreplaced placeholders remain
-        assert!(!generated.contains("!{{"));
-        assert!(!generated.contains("}}!"));
+        // Ensure no unreplaced placeholders remain in HTTP
+        assert!(!http_generated.contains("!{{"));
+        assert!(!http_generated.contains("}}!"));
+        assert!(http_generated.contains("/custom/www/complete.test.com"));
         
-        // Verify custom paths are used
-        assert!(generated.contains("/custom/www/complete.test.com"));
-        assert!(generated.contains("/custom/ssl/complete.test.com"));
+        // Ensure no unreplaced placeholders remain in HTTPS
+        assert!(!https_generated.contains("!{{"));
+        assert!(!https_generated.contains("}}!"));
+        assert!(https_generated.contains("/custom/www/complete.test.com"));
+        assert!(https_generated.contains("/custom/ssl/complete.test.com"));
     }
 
     #[test]
-    fn test_generate_config_template_structure() {
+    fn test_protocol_enum_equality() {
+        assert_eq!(NginxProtocol::Http, NginxProtocol::Http);
+        assert_eq!(NginxProtocol::Https, NginxProtocol::Https);
+        assert_ne!(NginxProtocol::Http, NginxProtocol::Https);
+    }
+
+    #[test]
+    fn test_generate_config_with_ssl_but_http_protocol() {
+        // Verify that having SSL configured doesn't affect HTTP template generation
         let config = NginxConfig::new(
-            "structure.test.com".to_string(),
+            "test.com".to_string(),
             "/var/www/html".to_string(),
             "/etc/nginx/conf.d".to_string(),
-            Some("/etc/nginx/ssl".to_string()),
+            Some("/etc/nginx/ssl".to_string()),  // SSL is configured
         );
 
-        let generated = config.generate_config();
+        let http_config = config.generate_config(NginxProtocol::Http);
         
-        // Verify the templates are combined with proper spacing
-        let lines: Vec<&str> = generated.lines().collect();
+        // Should only contain HTTP configuration, not HTTPS
+        assert!(http_config.contains("listen 80"));
+        assert!(!http_config.contains("listen 443"));
+        // SSL path shouldn't be replaced in HTTP template (it doesn't exist there)
+        assert!(!http_config.contains("/etc/nginx/ssl"));
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    #[ignore] // Requires nginx to be installed
+    fn test_validate_nginx_configuration() {
+        // This test requires nginx to be installed on the system
+        let result = validate_nginx_configuration();
         
-        // Should have both server blocks
-        assert!(lines.iter().any(|line| line.contains("### HTTP Server ###")));
-        assert!(lines.iter().any(|line| line.contains("### HTTPS Server ###")));
-        
-        // Verify there's a gap between HTTP and HTTPS blocks
-        assert!(generated.contains("###\n\n### HTTPS"));
+        // We can't guarantee the outcome, but it should return a Result
+        match result {
+            Ok(()) => println!("System nginx config is valid"),
+            Err(e) => println!("System nginx config error: {}", e),
+        }
     }
 }

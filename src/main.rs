@@ -7,6 +7,7 @@ pub mod utils;
 pub mod constants;
 use cli::commands::{spawn_site, delete_site};
 use std::process;
+use colored::*;
 
 fn main() {
     let matches = cli::args::get_matches();
@@ -18,6 +19,12 @@ fn main() {
         
         let site_name = matches.get_one::<String>("site_name").unwrap();
         let ssl = matches.get_flag("ssl");
+        if ssl && !check_if_acme_sh_installed() {
+            println!("{} 'acme.sh' is not installed. SSL generation requires 'acme.sh' to be installed.", "❌".bright_yellow());
+            println!("");
+            println!("{}  You can install it manually from https://github.com/acmesh-official/acme.sh", "ℹ️".bright_blue());
+            process::exit(1);
+        }
         let no_wp = matches.get_flag("no-wp");
         spawn_site(site_name, ssl, no_wp);
     } else if let Some(matches) = matches.subcommand_matches("delete") {
@@ -108,4 +115,41 @@ fn print_privilege_error() {
     println!("   • https://linux.die.net/man/8/sudo");
     println!("   • https://docs.nginx.com/nginx/admin-guide/");
     println!();
+}
+fn check_if_acme_sh_installed() -> bool {
+    use std::process::Command;
+
+    match Command::new("acme.sh").arg("--version").output() {
+        Ok(output) => output.status.success(),
+        Err(_) => false,
+    }
+}
+#[allow(dead_code)]
+fn try_acme_sh_installation() -> Result<(), String> {
+    use std::process::Command;
+
+    println!("{} Attempting to install acme.sh...", "🔄".bright_blue());
+
+    let install_output = Command::new("curl")
+        .args(&[
+            "https://get.acme.sh",
+            "|",
+            "sh",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to execute curl command: {}", e))?;
+
+    if !install_output.status.success() {
+        let stderr = String::from_utf8_lossy(&install_output.stderr);
+        let stdout = String::from_utf8_lossy(&install_output.stdout);
+
+        return Err(format!(
+            "Failed to install acme.sh:\n\
+            Error output:\n{}{}",
+            stdout, stderr
+        ));
+    }
+
+    println!("{} acme.sh installed successfully!", "✓".bright_green());
+    Ok(())
 }

@@ -1,4 +1,4 @@
-### HTTP Server ###
+######E2SP-HTTP-CONFIGURATION######
 server {
    listen 80;
    server_name !{{site_name}}!;
@@ -28,4 +28,4 @@ server {
        include fastcgi_params;
    }
 }
-### HTTP Server ###
+######E2SP-HTTP-CONFIGURATION######

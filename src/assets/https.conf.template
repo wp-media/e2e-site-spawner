@@ -1,4 +1,4 @@
-### HTTPS Server ###
+######E2SP-HTTPS-CONFIGURATION######
 server {
     listen 443 ssl http2;
     server_name !{{site_name}}!;
@@ -49,4 +49,4 @@ server {
         include fastcgi_params;
     }
 }
-### HTTPS Server ###
+######E2SP-HTTPS-CONFIGURATION######
