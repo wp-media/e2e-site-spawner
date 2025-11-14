@@ -34,13 +34,16 @@ pub enum SpawnSteps {
 /// * `ssl` - Optional flag to enable SSL for the site.
 /// * `no_wp` - Optional flag to create the site without WordPress.
 pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
-    let ssl_path = if ssl {
+    let ssl_path = ssl.then(|| {
         ssl::print_ssl_warning(site_name);
-        Some(format!("{}/{}", SITES_SSL_PATH, site_name))
-    } else {
-        None
-    };
+        format!("{}/{}", SITES_SSL_PATH, site_name)
+    });
     println!("Preparing to create site: {}", site_name);
+    if no_wp {
+        println!("WordPress will not be installed on this site.");
+    } else {
+        println!("WordPress will be installed on this site.");
+    }
     validate_site_name(site_name);
     let mut steps_completed: Vec<SpawnSteps> = Vec::new();
     let nginx_config = nginx::config::NginxConfig::new(
@@ -63,11 +66,17 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         }
         Err(e) => {
             eprintln!("✗ Failed to create Nginx configuration file for HTTP: {}", e);
-            revert_site_spawn(site_name, &steps_completed, &nginx_config);
+            process::exit(1);
         }
     }
-        match sites::create_directory_if_not_exists(site_name, Some(0o777)) {
+    match sites::create_directory_if_not_exists(nginx_config.root.as_str(), Some(0o777)) {
             Ok(()) => {
+                // Change ownership of Sites directory www-data:root
+                if sites::set_path_owner(Some("www-data"), Some("root"), nginx_config.root.as_str()).is_err() {
+                    eprintln!("✗ Failed to set Sites directory ownership.");
+                    sites::remove_directory(nginx_config.root.as_str()).unwrap_or(());
+                    revert_site_spawn(site_name, &steps_completed, &nginx_config);
+                }
                 println!("✓ Site directory created successfully");
                 steps_completed.push(SpawnSteps::CreateSiteDirectory);
             }
@@ -76,10 +85,10 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
                 revert_site_spawn(site_name, &steps_completed, &nginx_config);
             }
         }
-        if validate_nginx_configuration().is_err() {
-            eprintln!("✗ Nginx configuration validation failed after creating HTTP config.");
+        let _ = validate_nginx_configuration().unwrap_or_else(|e| {
+            eprintln!("✗ Nginx configuration validation failed after creating HTTP config. \n{}", e);
             revert_site_spawn(site_name, &steps_completed, &nginx_config);
-        }
+        });
         if let Some(ssl_root) = &nginx_config.ssl_root {
             println!("SSL will be enabled for this site.");
             match sites::create_directory_if_not_exists(
@@ -88,16 +97,14 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
             ) {
                 Ok(()) => {
                     // Change ownership of SSL directory to current user:root
-                    
                     let current_user = env::var("USER").unwrap_or_else(|_| "www-data".to_string());
-                    
-                    if sites::set_path_owner(&current_user, ssl_root).is_err() {
+                    if sites::set_path_owner(Some(&current_user), Some("root"), ssl_root).is_err() {
                         eprintln!("✗ Failed to set SSL directory ownership.");
                         sites::remove_directory(ssl_root).unwrap_or(());
                         revert_site_spawn(site_name, &steps_completed, &nginx_config);
                     }
-                        println!("✓ SSL directory created successfully");
-                        steps_completed.push(SpawnSteps::CreateSSLDirectory);
+                    println!("✓ SSL directory created successfully");
+                    steps_completed.push(SpawnSteps::CreateSSLDirectory);
                 }
                 Err(e) => {
                     eprintln!("✗ Failed to create SSL directory: {}", e);
@@ -107,19 +114,17 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         }
         match ssl::generate_ssl(&nginx_config) {
             Ok(()) => {
-                // println!("✓ SSL certificates generated and installed successfully");
+                println!("✓ SSL certificates generated and installed successfully");
                 steps_completed.push(SpawnSteps::CreateSSL);
                 let https_config = nginx_config.generate_config(nginx::config::NginxProtocol::Https);
-                if let Some(ssl_root) = &nginx_config.ssl_root {
-                    match append_to_nginx_file(ssl_root, &https_config) {
-                        Ok(()) => {
-                            println!("✓ Nginx configuration file updated for HTTPS successfully");
-                            steps_completed.push(SpawnSteps::CreateNginxConfigWithSSL);
-                        }
-                        Err(e) => {
-                            eprintln!("✗ Failed to update Nginx configuration file for HTTPS: {}", e);
-                            revert_site_spawn(site_name, &steps_completed, &nginx_config);
-                        }
+                match append_to_nginx_file(&nginx_config.nginx_config_file_path, &https_config) {
+                    Ok(()) => {
+                        println!("✓ Nginx configuration file updated for HTTPS successfully");
+                        steps_completed.push(SpawnSteps::CreateNginxConfigWithSSL);
+                    }
+                    Err(e) => {
+                        eprintln!("✗ Failed to update Nginx configuration file for HTTPS: {}", e);
+                        revert_site_spawn(site_name, &steps_completed, &nginx_config);
                     }
                 }
             }
@@ -128,17 +133,15 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
                 revert_site_spawn(site_name, &steps_completed, &nginx_config);
             }
         }
-        if validate_nginx_configuration().is_err() {
-            eprintln!("✗ Nginx configuration validation failed after creating HTTPS config.");
+        let _ = validate_nginx_configuration().unwrap_or_else(|e| {
+            eprintln!("✗ Nginx configuration validation failed after creating HTTPS config. \n{}", e);
             revert_site_spawn(site_name, &steps_completed, &nginx_config);
-        }
-        if no_wp {
-            println!("WordPress will not be installed on this site.");
-        } else {
-            println!("WordPress will be installed on this site.");
+        });
+        if !no_wp {
+            println!("Installing WordPress on the site.");
             // Create database for WordPress site
             let db_name = db::create_db_name(site_name);
-    
+
             match db::create_wordpress_database(&db_name, false) {
                 Ok(db_name) => {
                     println!("✓ Database created successfully: {}", db_name);

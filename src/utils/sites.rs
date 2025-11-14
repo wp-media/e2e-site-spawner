@@ -7,6 +7,7 @@ use std::process;
 use crate::cli::commands::SpawnSteps;
 use crate::nginx;
 use crate::utils::{db};
+use libc::group;
 use nix::unistd::{Uid, Gid, Group};
 
 /// Error type for file creation operations
@@ -73,7 +74,25 @@ pub fn revert_site_spawn(site_name: &str, steps: &Vec<SpawnSteps>, nginx_config:
     process::exit(1);
 }
 
-
+pub fn put_wordpress_in_site_directory(site_path: &str) -> Result<(), FileCreationError> {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "curl -o {site_path}/wordpress.tar.gz {wordpress_url} && tar -xzf {site_path}/wordpress.tar.gz -C {site_path} --strip-components=1 && rm {site_path}/wordpress.tar.gz",
+            wordpress_url = crate::constants::LATEST_WORDPRESS_URL,
+            site_path = site_path
+        ))
+        .output()
+        .map_err(|e| FileCreationError::FileWriteFailed(format!("Failed to execute command: {}", e)))?;
+    
+    if !output.status.success() {
+        return Err(FileCreationError::FileWriteFailed(
+            format!("Command failed with status {}: {}", output.status, String::from_utf8_lossy(&output.stderr))
+        ));
+    }
+    
+    Ok(())
+}
 
 pub fn create_directory_if_not_exists(dir_path: &str, permissions: Option<u32>) -> Result<(), FileCreationError> {
     let path = Path::new(&dir_path);
@@ -103,23 +122,71 @@ pub fn create_directory_if_not_exists(dir_path: &str, permissions: Option<u32>) 
     Ok(())
 }
 
-pub fn set_path_owner(current_user: &str, ssl_root: &str) -> Result<(), FileCreationError> {
+/// Changes the ownership of a file or directory at the given path.
+///
+/// # Arguments
+///
+/// * `user_name` - An `Option<&str>` specifying the username to set as the new owner.
+///                 If `None`, the user (owner) will not be changed.
+/// * `group_name` - An `Option<&str>` specifying the group name to set as the new group owner.
+///                  If `None`, the group will not be changed.
+/// * `path` - The path to the file or directory whose ownership should be changed.
+///
+/// # Returns
+///
+/// * `Ok(())` if the ownership change was successful.
+/// * `Err(FileCreationError)` if the user or group does not exist, or if the ownership change fails.
+///
+/// # Behavior
+///
+/// - If `user_name` is `Some` and `group_name` is `None`, only the user (owner) will be changed.
+/// - If `user_name` is `None` and `group_name` is `Some`, only the group will be changed.
+/// - If both are `Some`, both user and group will be changed.
+/// - If both are `None`, nothing will be changed (no-op).
+///
+/// This function uses [`nix::unistd::chown`](https://docs.rs/nix/latest/nix/unistd/fn.chown.html),
+/// which maps to the POSIX `chown(2)` system call. Passing `None` for either user or group
+/// leaves that attribute unchanged (see [chown(2) man page](https://man7.org/linux/man-pages/man2/chown.2.html)).
+///
+/// # Example
+///
+/// ````rust
+/// set_path_owner(Some("www-data"), None, "/var/www/example")?; // Change only user
+/// set_path_owner(None, Some("www-data"), "/var/www/example")?; // Change only group
+/// set_path_owner(Some("www-data"), Some("www-data"), "/var/www/example")?; // Change both
+/// set_path_owner(None, None, "/var/www/example")?; // No-op
+/// ````
+///
+/// # Errors
+///
+/// Returns `FileCreationError::PermissionSetFailed` if the user or group does not exist,
+/// or if the ownership change fails for any reason.
+pub fn set_path_owner(user_name: Option<&str>, group_name: Option<&str>, path: &str) -> Result<(), FileCreationError> {
     // Get the UID for the current user
-    let uid = match nix::unistd::User::from_name(&current_user) {
-        Ok(Some(user)) => user.uid,
-        _ => Uid::current(),
+    let uid = match user_name {
+        Some(name) => match nix::unistd::User::from_name(name) {
+            Ok(Some(user)) => Some(user.uid),
+            _ => return Err(FileCreationError::PermissionSetFailed(
+                format!("User '{}' not found", name)
+            )),
+        },
+        None => None
     };
-    
-    // Get the GID for root group
-    let gid = match Group::from_name("root") {
-        Ok(Some(group)) => group.gid,
-        _ => Gid::from_raw(0),
+    // Get the GID for the specified group
+    let gid = match group_name {
+        Some(name) => match Group::from_name(name) {
+            Ok(Some(group)) => Some(group.gid),
+            _ => return Err(FileCreationError::PermissionSetFailed(
+                format!("Group '{}' not found", name)
+            )),
+        },
+        None => None,
     };
     
     // Apply ownership change
-    nix::unistd::chown(ssl_root, Some(uid), Some(gid)).map_err(|e| {
+    nix::unistd::chown(path, uid, gid).map_err(|e| {
         FileCreationError::PermissionSetFailed(
-            format!("Cannot set ownership on '{}': {}", ssl_root, e)
+            format!("Cannot set ownership on '{}': {}", path, e)
         )
     })?;
     Ok(())

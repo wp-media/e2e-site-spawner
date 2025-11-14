@@ -203,7 +203,7 @@ pub fn validate_nginx_configuration() -> Result<(), String> {
         .args(&["-t"])
         .output()
         .map_err(|e| {
-            format!("Failed to execute nginx: {}. Ensure nginx is installed and in PATH", e)
+            format!("Failed to execute nginx: {}.", e)
         })?;
 
     if output.status.success() {
