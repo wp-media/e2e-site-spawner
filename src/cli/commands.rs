@@ -139,6 +139,15 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         });
         if !no_wp {
             println!("Installing WordPress on the site.");
+            match sites::put_wordpress_in_site_directory(nginx_config.root.as_str()) {
+                Ok(()) => {
+                    println!("✓ WordPress installed successfully in site directory");
+                }
+                Err(e) => {
+                    eprintln!("✗ Failed to install WordPress: {}", e);
+                    revert_site_spawn(site_name, &steps_completed, &nginx_config);
+                }
+            }
             // Create database for WordPress site
             let db_name = db::create_db_name(site_name);
 
