@@ -6,7 +6,7 @@
 /// a description of its intended effect.
 
 
-use crate::constants::{DB_HOST, HTML_DEFAULT_INDEX_FILE, NGINX_CONF_D_PATH, SITES_PATH, SITES_SSL_PATH};
+use crate::constants::{DB_HOST, HTML_DEFAULT_INDEX_FILE, NGINX_CONF_D_PATH, SITES_PATH};
 use crate::constants::{DB_USER, DB_PASSWORD, DB_CHARSET};
 use crate::nginx;
 use crate::nginx::config::validate_nginx_configuration;
@@ -36,10 +36,9 @@ pub enum SpawnSteps {
 /// * `ssl` - Optional flag to enable SSL for the site.
 /// * `no_wp` - Optional flag to create the site without WordPress.
 pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
-    let ssl_path = ssl.then(|| {
+    if ssl {
         ssl::print_ssl_warning(site_name);
-        format!("{}/{}", SITES_SSL_PATH, site_name)
-    });
+    }
     println!("Preparing to create site: {}", site_name);
     if no_wp {
         println!("WordPress will not be installed on this site.");
@@ -52,7 +51,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         site_name.to_string(),
         SITES_PATH.to_string(),
         NGINX_CONF_D_PATH.to_string(),
-        ssl_path,
+        ssl,
     );
     nginx_config.validate().unwrap_or_else(|e| {
         eprintln!("✗ Validation failed: {}", e);
@@ -184,6 +183,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
 ///
 /// * `site_name` - The name of the site to delete.
 pub fn delete_site(site_name: &str) {
+    // TODO: Remove site directory recursively, remove Nginx config file, remove SSL certs, drop database
     println!("Preparing to delete site: {}", site_name);
     let db_name = db::create_db_name(site_name);
     match db::drop_database(&db_name) {

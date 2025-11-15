@@ -1,4 +1,4 @@
-use crate::constants::{NGINX_HTTP_TEMPLATE, NGINX_HTTPS_TEMPLATE};
+use crate::constants::{NGINX_HTTP_TEMPLATE, NGINX_HTTPS_TEMPLATE, SITES_SSL_PATH};
 /// This module defines the structure and functions for managing Nginx configuration files.
 ///
 /// The primary responsibilities include:
@@ -41,8 +41,11 @@ impl NginxConfig {
         site_name: String,
         sites_path: String,
         nginx_config: String,
-        ssl_path: Option<String>,
+        use_ssl: bool,
     ) -> Self {
+        let ssl_path = use_ssl.then(|| {
+            format!("{}/{}", SITES_SSL_PATH, site_name)
+        });
         let nginx_config_file_path = format!("{}/{}.conf", nginx_config, site_name);
         let root = format!("{}/{}", sites_path, site_name);
         NginxConfig {
@@ -279,7 +282,7 @@ mod tests {
             "test.example.com".to_string(),
             "/var/www/html".to_string(),
             "/etc/nginx/conf.d".to_string(),
-            None,
+            false, // No SSL
         );
 
         let generated = config.generate_config(NginxProtocol::Http);
@@ -307,7 +310,7 @@ mod tests {
             "secure.example.com".to_string(),
             "/var/www/html".to_string(),
             "/etc/nginx/conf.d".to_string(),
-            Some("/etc/nginx/ssl".to_string()),
+            true, // SSL enabled
         );
 
         let generated = config.generate_config(NginxProtocol::Https);
@@ -338,7 +341,7 @@ mod tests {
             "example.com".to_string(),
             "/var/www/html".to_string(),
             "/etc/nginx/conf.d".to_string(),
-            None,  // No SSL path
+            false,  // No SSL
         );
 
         // This should panic
@@ -351,7 +354,7 @@ mod tests {
             "my-site.sub.example.com".to_string(),
             "/var/www/html".to_string(),
             "/etc/nginx/conf.d".to_string(),
-            Some("/etc/nginx/ssl".to_string()),
+            true, // SSL enabled
         );
 
         let http_generated = config.generate_config(NginxProtocol::Http);
@@ -372,7 +375,7 @@ mod tests {
             "complete.test.com".to_string(),
             "/custom/www".to_string(),
             "/etc/nginx/conf.d".to_string(),
-            Some("/custom/ssl".to_string()),
+            true, // SSL enabled
         );
 
         let http_generated = config.generate_config(NginxProtocol::Http);
@@ -399,12 +402,11 @@ mod tests {
 
     #[test]
     fn test_generate_config_with_ssl_but_http_protocol() {
-        // Verify that having SSL configured doesn't affect HTTP template generation
         let config = NginxConfig::new(
             "test.com".to_string(),
             "/var/www/html".to_string(),
             "/etc/nginx/conf.d".to_string(),
-            Some("/etc/nginx/ssl".to_string()),  // SSL is configured
+            true, // SSL enabled
         );
 
         let http_config = config.generate_config(NginxProtocol::Http);
