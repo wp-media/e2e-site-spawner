@@ -6,7 +6,8 @@
 /// a description of its intended effect.
 
 
-use crate::constants::{HTML_DEFAULT_INDEX_FILE, NGINX_CONF_D_PATH, SITES_PATH, SITES_SSL_PATH};
+use crate::constants::{DB_HOST, HTML_DEFAULT_INDEX_FILE, NGINX_CONF_D_PATH, SITES_PATH, SITES_SSL_PATH};
+use crate::constants::{DB_USER, DB_PASSWORD, DB_CHARSET};
 use crate::nginx;
 use crate::nginx::config::validate_nginx_configuration;
 use crate::utils::db;
@@ -24,6 +25,7 @@ pub enum SpawnSteps {
     CreateSSL,
     CreateNginxConfigWithSSL,
     CreateDatabase(String),
+    CreateWPConfigFile,
 }
 
 /// Spawns a new site with the given name.
@@ -161,7 +163,16 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
                     revert_site_spawn(site_name, &steps_completed, &nginx_config);
                 }
             }
-            // TODO: Create wp-config.php with database details
+            match sites::create_wp_config_file(&nginx_config.root, &db_name, DB_USER, DB_PASSWORD, DB_HOST, DB_CHARSET) {
+                Ok(()) => {
+                    println!("✓ WordPress configuration file created successfully");
+                    steps_completed.push(SpawnSteps::CreateWPConfigFile);
+                }
+                Err(e) => {
+                    eprintln!("✗ Failed to create wp-config.php file: {}", e);
+                    revert_site_spawn(site_name, &steps_completed, &nginx_config);
+                }
+            }
         } else {
             let path = format!("{}/index.html", nginx_config.root);
             create_file_with_content_if_not_exists(&path, HTML_DEFAULT_INDEX_FILE, None).unwrap_or(());

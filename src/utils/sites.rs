@@ -10,6 +10,7 @@ use crate::nginx;
 use crate::utils::{db};
 use crate::utils::sites;
 use nix::unistd::{Group};
+use rand::Rng;
 
 
 /// Error type for file creation operations
@@ -70,6 +71,10 @@ pub fn revert_site_spawn(site_name: &str, steps: &Vec<SpawnSteps>, nginx_config:
                     Err(e) => eprintln!("✗ Failed to drop database: {}", e),
                 }
             }
+            SpawnSteps::CreateWPConfigFile => {
+                println!("Reverting: Deleting wp-config.php for site: {}", site_name);
+                // Future implementation goes here
+            }
         }
     }
     println!("Site creation process reverted for site: {}", site_name);
@@ -92,10 +97,58 @@ pub fn put_wordpress_in_site_directory(site_path: &str) -> Result<(), FileCreati
             format!("Command failed with status {}: {}", output.status, String::from_utf8_lossy(&output.stderr))
         ));
     }
-    
+
     Ok(())
 }
+pub fn create_wp_config_file(site_path: &str, db_name: &str, db_user: &str, db_password: &str, db_host: &str, db_charset: &str) -> Result<(), FileCreationError> {
+    let wp_config_sample_path = format!("{}/wp-config-sample.php", site_path);
+    let wp_config_sample_content = fs::read_to_string(&wp_config_sample_path).map_err(|e| {
+        FileCreationError::FileWriteFailed(
+            format!("Cannot read wp-config-sample.php: {}", e)
+        )
+    })?;
+    let wp_config_content = generate_wp_config_content_from_sample(
+        db_name,
+        db_user,
+        db_password,
+        db_host,
+        db_charset,
+        wp_config_sample_content
+    )?;
+    let wp_config_path = format!("{}/wp-config.php", site_path);
+    create_file_with_content_if_not_exists(&wp_config_path, &wp_config_content, None)?;
 
+    Ok(())
+}
+pub fn generate_wp_config_content_from_sample(db_name: &str, db_user: &str, db_password: &str, db_host: &str, db_charset: &str, wp_config_sample: String) -> Result<String, FileCreationError> {
+    
+    let mut wp_config_content = wp_config_sample;
+    wp_config_content = wp_config_content
+        .replace("database_name_here", db_name)
+        .replace("username_here", db_user)
+        .replace("password_here", db_password)
+        .replace("localhost", db_host)
+        .replace("utf8", db_charset);
+    // Add security keys
+    loop {
+        let placeholder = "put your unique phrase here";
+        if let Some(pos) = wp_config_content.find(placeholder) {
+            let salt_key = create_salt_key();
+            wp_config_content.replace_range(pos..pos + placeholder.len(), &salt_key);
+        } else {
+            break;
+        }
+    }
+
+    Ok(wp_config_content)
+}
+fn create_salt_key() -> String {
+    rand::rng()
+        .sample_iter(&rand::distr::Alphanumeric)
+        .take(64)
+        .map(char::from)
+        .collect()
+}
 pub fn create_directory_if_not_exists(dir_path: &str, permissions: Option<u32>) -> Result<(), FileCreationError> {
     let path = Path::new(&dir_path);
     if path.exists() {
