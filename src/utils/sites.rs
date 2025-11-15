@@ -1,14 +1,16 @@
 // use predicates::path;
-use std::fs;
+use std::{fs, io, io::Write};
 use std::path::{Path};
 use std::os::unix::fs::PermissionsExt;
 use std::process;
+use std::fs::OpenOptions;
 
 use crate::cli::commands::SpawnSteps;
 use crate::nginx;
 use crate::utils::{db};
-use libc::group;
-use nix::unistd::{Uid, Gid, Group};
+use crate::utils::sites;
+use nix::unistd::{Group};
+
 
 /// Error type for file creation operations
 #[derive(Debug)]
@@ -119,6 +121,55 @@ pub fn create_directory_if_not_exists(dir_path: &str, permissions: Option<u32>) 
             })?;
         }
     }
+    Ok(())
+}
+
+pub fn create_file_with_content_if_not_exists(path: &str, content: &str, permissions: Option<u32>) -> Result<(), FileCreationError> {
+    let file_path = Path::new(&path);
+    // Check if file already exists - FAIL if it does
+    if file_path.exists() {
+        return Err(FileCreationError::FileWriteFailed(
+            format!("File already exists: {}.", path)
+        ));
+    }
+
+    // Write the file - use create_new to ensure atomic creation
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)  // Fails if file exists (atomic check-and-create)
+        .open(&file_path)
+        .map_err(|e| {
+            if e.kind() == io::ErrorKind::AlreadyExists {
+                FileCreationError::FileWriteFailed(
+                    format!("File already exists: {}.", path)
+                )
+            } else {
+                FileCreationError::FileWriteFailed(
+                    format!("Cannot create file '{}': {}", path, e)
+                )
+            }
+        })?;
+
+    file.write_all(content.as_bytes()).map_err(|e| {
+        FileCreationError::FileWriteFailed(
+            format!("Cannot write to '{}': {}", path, e)
+        )
+    })?;
+
+    // Set appropriate permissions (644 - readable by all, writable by owner)
+    #[cfg(unix)]
+    {
+        if let Some(permissions) = permissions {
+            let permissions = fs::Permissions::from_mode(permissions);
+            fs::set_permissions(&file_path, permissions).map_err(|e| {
+            sites::remove_file(&path).unwrap_or(());
+            FileCreationError::PermissionSetFailed(
+                format!("Cannot set permissions on '{}': {}", path, e)
+            )
+        })?;
+        }
+    }
+
     Ok(())
 }
 

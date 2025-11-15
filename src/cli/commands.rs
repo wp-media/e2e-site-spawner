@@ -6,12 +6,12 @@
 /// a description of its intended effect.
 
 
-use crate::constants::{NGINX_CONF_D_PATH, SITES_PATH, SITES_SSL_PATH};
+use crate::constants::{HTML_DEFAULT_INDEX_FILE, NGINX_CONF_D_PATH, SITES_PATH, SITES_SSL_PATH};
 use crate::nginx;
 use crate::nginx::config::validate_nginx_configuration;
 use crate::utils::db;
 use crate::utils::ssl;
-use crate::utils::sites::{self, revert_site_spawn};
+use crate::utils::sites::{self, create_file_with_content_if_not_exists, revert_site_spawn};
 use crate::nginx::{create_nginx_file, append_to_nginx_file};
 use crate::utils::validators::validate_site_name;
 use std::process;
@@ -161,6 +161,10 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
                     revert_site_spawn(site_name, &steps_completed, &nginx_config);
                 }
             }
+            // TODO: Create wp-config.php with database details
+        } else {
+            let path = format!("{}/index.html", nginx_config.root);
+            create_file_with_content_if_not_exists(&path, HTML_DEFAULT_INDEX_FILE, None).unwrap_or(());
         }
 }
 /// Deletes the specified site.

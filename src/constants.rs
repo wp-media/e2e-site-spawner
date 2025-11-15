@@ -6,6 +6,7 @@ pub const NGINX_HTTP_TEMPLATE: &'static str = include_str!("./assets/http.conf.t
 pub const NGINX_HTTPS_TEMPLATE: &'static str = include_str!("./assets/https.conf.template");
 pub const NGINX_HTTP_CONFIG_MARKER: &'static str = "######E2SP-HTTP-CONFIGURATION######";
 pub const NGINX_HTTPS_CONFIG_MARKER: &'static str = "######E2SP-HTTPS-CONFIGURATION######";
+pub const HTML_DEFAULT_INDEX_FILE: &'static str = include_str!("./assets/default-index.html");
 
 // WordPress download URL constant
 pub const LATEST_WORDPRESS_URL: &'static str = "https://wordpress.org/latest.tar.gz";
