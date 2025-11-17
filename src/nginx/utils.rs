@@ -307,6 +307,22 @@ pub fn append_to_nginx_file(path: &str, content: &str) -> Result<(), FileCreatio
     Ok(())
 }
 
+pub fn reload_nginx() -> Result<(), String> {
+    use std::process::Command;
+
+    let status = Command::new("nginx")
+        .arg("-s")
+        .arg("reload")
+        .status()
+        .map_err(|e| format!("Failed to execute nginx command: {}", e))?;
+
+    if !status.success() {
+        return Err(format!("Nginx reload failed with status: {}", status));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
