@@ -194,7 +194,7 @@ fn create_database(conn: &mut Conn, db_name: &str) -> Result<(), DbError> {
     Ok(())
 }
 /// Validates that a database name contains only valid characters
-fn validate_db_name(name: &str) -> Result<(), DbError> {
+pub fn validate_db_name(name: &str) -> Result<(), DbError> {
     if name.is_empty() {
         return Err(DbError::InvalidDatabaseName(
             "Database name cannot be empty".to_string(),
@@ -228,14 +228,10 @@ pub fn drop_database(db_name: &str) -> Result<(), DbError> {
 
     let config = DbConfig::default();
     let mut conn = create_connection(&config)?;
-
-    println!("Dropping database '{}'...", db_name);
     let drop_query = format!("DROP DATABASE IF EXISTS `{}`", db_name);
-
     conn.exec_drop(&drop_query, ())
         .map_err(|e| DbError::from(e))?;
 
-    println!("✓ Database '{}' dropped successfully", db_name);
     Ok(())
 }
 

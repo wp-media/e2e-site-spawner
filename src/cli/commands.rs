@@ -183,11 +183,37 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
 ///
 /// * `site_name` - The name of the site to delete.
 pub fn delete_site(site_name: &str) {
-    // TODO: Remove site directory recursively, remove Nginx config file, remove SSL certs, drop database
     println!("Preparing to delete site: {}", site_name);
+    let nginx_config = nginx::config::NginxConfig::new(
+        site_name.to_string(),
+        SITES_PATH.to_string(),
+        NGINX_CONF_D_PATH.to_string(),
+        true,
+    );
+    nginx_config.validate().unwrap_or_else(|e| {
+        eprintln!("✗ Validation failed: {}", e);
+        process::exit(1);
+    });
+    println!("Deleting site resources...");
+    let _ = sites::remove_directory(nginx_config.root.as_str()).unwrap_or_else(|e| {
+        eprintln!("✗ Failed to remove site directory: {}", e);
+    });
+    println!("Removing Nginx configuration...");
+    sites::remove_file(nginx_config.nginx_config_file_path.as_str())
+        .unwrap_or_else(|e| {
+            eprintln!("✗ Failed to remove Nginx configuration file: {}", e);
+    });
+    println!("Removing SSL files...");
+    // Safe to call unwrap here as ssl_root is Some when ssl is true
+    sites::remove_directory(nginx_config.ssl_root.as_ref().unwrap())
+        .unwrap_or_else(|e| {
+            eprintln!("✗ Failed to remove SSL directory: {}", e);
+    });
     let db_name = db::create_db_name(site_name);
+    println!("Dropping database '{}'...", db_name);
     match db::drop_database(&db_name) {
-        Ok(()) => println!("✓ Database deleted successfully: {}", db_name),
+        Ok(()) => (),
+        // Ok(()) => println!("✓ Database deleted successfully: {}", db_name),
         Err(e) => eprintln!("✗ Failed to delete database: {}", e),
     }
 }
