@@ -5,7 +5,7 @@ mod cli;
 pub mod nginx;
 pub mod utils;
 pub mod constants;
-use cli::commands::{spawn_site, delete_site};
+use cli::commands::{spawn_site, delete_site, deactivate_site, activate_site};
 use std::process;
 use colored::*;
 
@@ -30,22 +30,27 @@ fn main() {
     } else if let Some(matches) = matches.subcommand_matches("delete") {
         // Check for root/sudo privileges before executing
         require_elevated_privileges();
-        
+
         let site_name = matches.get_one::<String>("site_name").unwrap();
         delete_site(site_name);
     }
-    // else if let Some(matches) = matches.subcommand_matches("deactivate") {
-    //     let site_name = matches.get_one::<String>("site_name").unwrap();
-    //     deactivate_site(site_name);
-    // } else if let Some(matches) = matches.subcommand_matches("activate") {
-    //     let site_name = matches.get_one::<String>("site_name").unwrap();
-    //     activate_site(site_name);
+    else if let Some(matches) = matches.subcommand_matches("deactivate") {
+        require_elevated_privileges();
+
+        let site_name = matches.get_one::<String>("site_name").unwrap();
+        deactivate_site(site_name);
+    } else if let Some(matches) = matches.subcommand_matches("activate") {
+        require_elevated_privileges();
+
+        let site_name = matches.get_one::<String>("site_name").unwrap();
+        activate_site(site_name);
     // } else if let Some(matches) = matches.subcommand_matches("update") {
     //     let site_name = matches.get_one::<String>("site_name").unwrap();
     //     let wp = matches.get_flag("wp");
     //     let ssl = matches.get_flag("ssl");
     //     update_site(site_name, wp, ssl);
     // } 
+    }
 }
 
 /// Checks if the program is running with elevated privileges (root or sudo).

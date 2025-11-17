@@ -17,6 +17,7 @@ use crate::nginx::{create_nginx_file, append_to_nginx_file};
 use crate::utils::validators::validate_site_name;
 use std::{fs, process};
 use std::env;
+use std::path::Path;
 
 pub enum SpawnSteps {
     CreateNginxConfig,
@@ -264,15 +265,33 @@ pub fn deactivate_site(site_name: &str) {
         NGINX_CONF_D_PATH.to_string(),
         false,
     );
-    let deactivated_path = format!("{}.deactivated", nginx_config.nginx_config_file_path);
-    match fs::rename(&nginx_config.nginx_config_file_path, &deactivated_path) {
+    nginx_config.validate().unwrap_or_else(|e| {
+        eprintln!("✗ Validation failed: {}", e);
+        process::exit(1);
+    });
+
+    let active_path = Path::new(&nginx_config.nginx_config_file_path);
+    let deactivated_path = active_path.with_extension("conf.deactivated");
+    
+    if !active_path.exists() {
+        println!("Nothing to deactivate for site '{}'.", site_name);
+        process::exit(0);
+    }
+
+    match fs::rename(&active_path, &deactivated_path) {
         Ok(()) => {
             println!("✓ Site '{}' deactivated successfully.", site_name);
         }
         Err(e) => {
             eprintln!("✗ Failed to deactivate site '{}': {}", site_name, e);
+            process::exit(1);
         }
     }
+
+    reload_nginx().unwrap_or_else(|e| {
+        eprintln!("✗ Failed to reload Nginx: {}", e);
+        process::exit(1);
+    });
 }
 
 /// Activates a previously deactivated site.
@@ -282,27 +301,41 @@ pub fn deactivate_site(site_name: &str) {
 /// * `site_name` - The name of the site to activate.
 pub fn activate_site(site_name: &str) {
     println!("Attempting to activate site: {}", site_name);
-    let nginx_config = nginx::config::NginxConfig::new(
-        site_name.to_string(),
-        SITES_PATH.to_string(),
-        NGINX_CONF_D_PATH.to_string(),
-        false,
-    );
     validate_nginx_configuration().unwrap_or_else(|e| {
         eprintln!("✗ Nginx configuration validation failed before activation.");
         eprintln!("Make sure Nginx configuration is okay, since nginx reloads is required.");
         eprintln!("Nginx error: \n{}", e);
         process::exit(1);
     });
-    let deactivated_path = format!("{}.deactivated", nginx_config.nginx_config_file_path);
-    match fs::rename(&deactivated_path, &nginx_config.nginx_config_file_path) {
+    let nginx_config = nginx::config::NginxConfig::new(
+        site_name.to_string(),
+        SITES_PATH.to_string(),
+        NGINX_CONF_D_PATH.to_string(),
+        false,
+    );
+    nginx_config.validate().unwrap_or_else(|e| {
+        eprintln!("✗ Validation failed: {}", e);
+        process::exit(1);
+    });
+    
+    let active_path = Path::new(&nginx_config.nginx_config_file_path);
+    let deactivated_path = active_path.with_extension("conf.deactivated");
+
+    if !deactivated_path.exists() {
+        println!("Nothing to activate for site '{}'.", site_name);
+        process::exit(0);
+    }
+
+    match fs::rename(&deactivated_path, &active_path) {
         Ok(()) => {
             println!("✓ Site '{}' activated successfully.", site_name);
         }
         Err(e) => {
             eprintln!("✗ Failed to activate site '{}': {}", site_name, e);
+            process::exit(1);
         }
     }
+    
     reload_nginx().unwrap_or_else(|e| {
         eprintln!("✗ Failed to reload Nginx: {}", e);
         process::exit(1);

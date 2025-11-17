@@ -70,34 +70,34 @@ pub fn build_cli() -> Command {
                         .index(1),
                 ),
         )
-        // .subcommand(
-        //     Command::new("deactivate")
-        //         .about("Temporarily disables site access without data loss")
-        //         .long_about("Deactivates the site (making it inaccessible) while preserving all data including files, database, SSL certificates, and Nginx configuration")
-        //         .after_help("EXAMPLES:\n    \
-        //             e2sp deactivate example.e2e.rocketlabsqa.ovh  # Temporarily disable site access")
-        //         .arg(
-        //             Arg::new("site_name")
-        //                 .help("The name of the site to deactivate (e.g., example.e2e.rocketlabsqa.ovh)")
-        //                 .required(true)
-        //                 .value_name("SITE_NAME")
-        //                 .index(1),
-        //         ),
-        // )
-        // .subcommand(
-        //     Command::new("activate")
-        //         .about("Re-enables a previously deactivated site")
-        //         .long_about("Reactivates a previously deactivated site, restoring access while keeping all existing data, configuration, and SSL certificates intact")
-        //         .after_help("EXAMPLES:\n    \
-        //             e2sp activate example.e2e.rocketlabsqa.ovh  # Re-enable site access")
-        //         .arg(
-        //             Arg::new("site_name")
-        //                 .help("The name of the site to activate (e.g., example.e2e.rocketlabsqa.ovh)")
-        //                 .required(true)
-        //                 .value_name("SITE_NAME")
-        //                 .index(1),
-        //         ),
-        // )
+        .subcommand(
+            Command::new("deactivate")
+                .about("Temporarily disables site access without data loss")
+                .long_about("Deactivates the site (making it inaccessible) while preserving all data including files, database, SSL certificates, and Nginx configuration")
+                .after_help("EXAMPLES:\n    \
+                    e2sp deactivate example.e2e.rocketlabsqa.ovh  # Temporarily disable site access")
+                .arg(
+                    Arg::new("site_name")
+                        .help("The name of the site to deactivate (e.g., example.e2e.rocketlabsqa.ovh)")
+                        .required(true)
+                        .value_name("SITE_NAME")
+                        .index(1),
+                ),
+        )
+        .subcommand(
+            Command::new("activate")
+                .about("Re-enables a previously deactivated site")
+                .long_about("Reactivates a previously deactivated site, restoring access while keeping all existing data, configuration, and SSL certificates intact")
+                .after_help("EXAMPLES:\n    \
+                    e2sp activate example.e2e.rocketlabsqa.ovh  # Re-enable site access")
+                .arg(
+                    Arg::new("site_name")
+                        .help("The name of the site to activate (e.g., example.e2e.rocketlabsqa.ovh)")
+                        .required(true)
+                        .value_name("SITE_NAME")
+                        .index(1),
+                ),
+        )
         // .subcommand(
         //     Command::new("update")
         //         .about("Modifies an existing site's configuration")
