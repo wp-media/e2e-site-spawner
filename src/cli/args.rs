@@ -10,7 +10,7 @@ const VERSION: &str = concat!(
     "\n",
     env!("CARGO_PKG_AUTHORS")
 );
-
+// TODO: Add aliases to commands where appropriate
 /// Builds the CLI application with all commands and arguments
 pub fn build_cli() -> Command {
     // Define custom styles for different elements
