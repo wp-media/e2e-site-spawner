@@ -29,6 +29,12 @@ pub enum SpawnSteps {
     CreateWPConfigFile,
 }
 
+pub const REMOVE_NGINX_CONFIG: [SpawnSteps; 2] = [SpawnSteps::CreateNginxConfig, SpawnSteps::CreateNginxConfigWithSSL];
+
+pub const REMOVE_SITE_DIRECTORY: [SpawnSteps; 2] = [SpawnSteps::CreateSiteDirectory, SpawnSteps::CreateWPConfigFile];
+
+pub const REMOVE_SSL_DIRECTORY: [SpawnSteps; 2] = [SpawnSteps::CreateSSLDirectory, SpawnSteps::CreateSSL];
+
 /// Spawns a new site with the given name.
 ///
 /// # Arguments

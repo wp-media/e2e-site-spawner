@@ -11,7 +11,7 @@ use crate::utils::{db};
 use crate::utils::sites;
 use nix::unistd::{Group};
 use rand::Rng;
-
+use crate::cli::commands::{REMOVE_NGINX_CONFIG, REMOVE_SITE_DIRECTORY, REMOVE_SSL_DIRECTORY};
 
 /// Error type for file creation operations
 #[derive(Debug)]
@@ -39,41 +39,92 @@ impl std::fmt::Display for FileCreationError {
 
 impl std::error::Error for FileCreationError {}
 
+/// All step groups for easier iteration
+const STEP_GROUPS: &[&[SpawnSteps]] = &[
+    &REMOVE_NGINX_CONFIG,
+    &REMOVE_SITE_DIRECTORY,
+    &REMOVE_SSL_DIRECTORY,
+];
+
+/// Helper function to check if a step from the same group has been reverted
+fn is_step_group_reverted(step: &SpawnSteps, reverted_steps: &[SpawnSteps]) -> bool {
+    // Find which group this step belongs to
+    for group in STEP_GROUPS {
+        if group.iter().any(|group_step| 
+            std::mem::discriminant(step) == std::mem::discriminant(group_step)
+        ) {
+            // Check if any step from this group has been reverted
+            return reverted_steps.iter().any(|reverted| 
+                group.iter().any(|group_step| 
+                    std::mem::discriminant(reverted) == std::mem::discriminant(group_step)
+                )
+            );
+        }
+    }
+    
+    // Handle steps not in any group (like CreateDatabase)
+    matches!(step, SpawnSteps::CreateDatabase(_)) && 
+        reverted_steps.iter().any(|s| matches!(s, SpawnSteps::CreateDatabase(_)))
+}
 
 pub fn revert_site_spawn(site_name: &str, steps: &Vec<SpawnSteps>, nginx_config: &nginx::config::NginxConfig) {
     eprintln!("✗ Site creation failed, reverting changes...");
+    let mut reverted_steps_completed: Vec<SpawnSteps> = Vec::new();
     for step in steps.iter().rev() {
+        // Skip if a step from the same group has already been reverted
+        if is_step_group_reverted(step, &reverted_steps_completed) {
+            continue;
+        }
+
         match step {
             SpawnSteps::CreateNginxConfig => {
                 println!("Reverting: Deleting Nginx config for site: {}", site_name);
-                // Future implementation goes here
+                remove_file(&nginx_config.nginx_config_file_path).unwrap_or_else(|e| {
+                    eprintln!("✗ Failed to delete Nginx config for site: {}: {}", site_name, e);
+                });
+                reverted_steps_completed.push(SpawnSteps::CreateNginxConfig);
             }
             SpawnSteps::CreateSiteDirectory => {
                 println!("Reverting: Deleting site directory for site: {}", site_name);
-                // Future implementation goes here
+                remove_directory(&nginx_config.root).unwrap_or_else(|e| {
+                    eprintln!("✗ Failed to delete site directory for site: {}: {}", site_name, e);
+                });
+                reverted_steps_completed.push(SpawnSteps::CreateSiteDirectory);
             }
             SpawnSteps::CreateSSLDirectory => {
                 println!("Reverting: Deleting SSL directory for site: {}", site_name);
-                // Future implementation goes here
+                remove_directory(&nginx_config.ssl_root.as_ref().unwrap()).unwrap_or_else(|e| {
+                    eprintln!("✗ Failed to delete SSL directory for site: {}: {}", site_name, e);
+                });
+                reverted_steps_completed.push(SpawnSteps::CreateSSLDirectory);
             }
             SpawnSteps::CreateSSL => {
-                println!("Reverting: Deleting SSL certificates for site: {}", site_name);
-                // Future implementation goes here
+                println!("Reverting: Deleting SSL directory for site: {}", site_name);
+                remove_directory(&nginx_config.ssl_root.as_ref().unwrap()).unwrap_or_else(|e| {
+                    eprintln!("✗ Failed to delete SSL directory for site: {}: {}", site_name, e);
+                });
+                reverted_steps_completed.push(SpawnSteps::CreateSSL);
             }
             SpawnSteps::CreateNginxConfigWithSSL => {
-                println!("Reverting: Removing HTTPS config from Nginx for site: {}", site_name);
-                // Future implementation goes here
+                println!("Reverting: Deleting Nginx config for site: {}", site_name);
+                remove_file(&nginx_config.nginx_config_file_path).unwrap_or_else(|e| {
+                    eprintln!("✗ Failed to delete Nginx config for site: {}: {}", site_name, e);
+                });
+                reverted_steps_completed.push(SpawnSteps::CreateNginxConfigWithSSL);
             }
             SpawnSteps::CreateDatabase(db_name) => {
                 println!("Reverting: Dropping database: {}", db_name);
-                match db::drop_database(db_name) {
-                    Ok(()) => println!("✓ Database dropped successfully: {}", db_name),
-                    Err(e) => eprintln!("✗ Failed to drop database: {}", e),
-                }
+                db::drop_database(db_name).unwrap_or_else(|e| {
+                    eprintln!("✗ Failed to drop database: {}: {}", db_name, e);
+                });
+                reverted_steps_completed.push(SpawnSteps::CreateDatabase(db_name.clone()));
             }
             SpawnSteps::CreateWPConfigFile => {
-                println!("Reverting: Deleting wp-config.php for site: {}", site_name);
-                // Future implementation goes here
+                println!("Reverting: Deleting site directory for site: {}", site_name);
+                remove_directory(&nginx_config.root).unwrap_or_else(|e| {
+                    eprintln!("✗ Failed to delete site directory for site: {}: {}", site_name, e);
+                });
+                reverted_steps_completed.push(SpawnSteps::CreateWPConfigFile);
             }
         }
     }
