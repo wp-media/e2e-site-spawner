@@ -1,38 +1,39 @@
+//! Nginx configuration module for the e2e-site-spawner.
+//!
+//! This module provides functionality for managing Nginx configuration files,
+//! including creation, validation, and template-based generation of site configurations.
+//!
+//! # Overview
+//!
+//! The module handles:
+//! - Loading and parsing Nginx configuration files
+//! - Validating configuration settings and syntax
+//! - Generating new configuration files from templates
+//! - Supporting both HTTP and HTTPS protocols
+//! - Path validation and security checks
+//!
+//! # Examples
+//!
+//! ```
+//! use nginx::config::{NginxConfig, NginxProtocol};
+//!
+//! // Create a new site configuration
+//! let config = NginxConfig::new(
+//!     "example.com".to_string(),
+//!     "/var/www/sites".to_string(),
+//!     "/etc/nginx/conf.d".to_string(),
+//!     true, // Enable SSL
+//! );
+//!
+//! // Validate the configuration
+//! config.validate()?;
+//!
+//! // Generate HTTP and HTTPS configurations
+//! let http_config = config.generate_config(NginxProtocol::Http);
+//! let https_config = config.generate_config(NginxProtocol::Https);
+//! ```
+
 use crate::constants::{NGINX_HTTP_TEMPLATE, NGINX_HTTPS_TEMPLATE, SITES_SSL_PATH};
-/// Nginx configuration module for the e2e-site-spawner.
-///
-/// This module provides functionality for managing Nginx configuration files,
-/// including creation, validation, and template-based generation of site configurations.
-///
-/// # Overview
-///
-/// The module handles:
-/// - Loading and parsing Nginx configuration files
-/// - Validating configuration settings and syntax
-/// - Generating new configuration files from templates
-/// - Supporting both HTTP and HTTPS protocols
-/// - Path validation and security checks
-///
-/// # Examples
-///
-/// ```
-/// use nginx::config::{NginxConfig, NginxProtocol};
-///
-/// // Create a new site configuration
-/// let config = NginxConfig::new(
-///     "example.com".to_string(),
-///     "/var/www/sites".to_string(),
-///     "/etc/nginx/conf.d".to_string(),
-///     true, // Enable SSL
-/// );
-///
-/// // Validate the configuration
-/// config.validate()?;
-///
-/// // Generate HTTP and HTTPS configurations
-/// let http_config = config.generate_config(NginxProtocol::Http);
-/// let https_config = config.generate_config(NginxProtocol::Https);
-/// ```
 use std::path::Path;
 use std::process::Command;
 
@@ -40,6 +41,11 @@ use std::process::Command;
 ///
 /// This enum determines which configuration template will be used
 /// and what port bindings and SSL settings will be applied.
+///
+/// # Variants
+///
+/// - `Http` - Standard HTTP protocol on port 80
+/// - `Https` - Secure HTTPS protocol on port 443 with SSL/TLS
 ///
 /// # Examples
 ///
@@ -50,11 +56,32 @@ use std::process::Command;
 ///     NginxProtocol::Https => println!("Using port 443 with SSL"),
 /// }
 /// ```
+///
+/// # Implementation Details
+///
+/// The protocol affects:
+/// - Which template is used for configuration generation
+/// - Port bindings (80 for HTTP, 443 for HTTPS)
+/// - SSL certificate configuration
+/// - Security headers and redirects
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NginxProtocol {
-    /// HTTP protocol - serves content on port 80 without encryption
+    /// HTTP protocol - serves content on port 80 without encryption.
+    /// 
+    /// # Characteristics
+    /// - No encryption
+    /// - Port 80
+    /// - Faster but insecure
+    /// - Suitable for development or internal networks
     Http,
-    /// HTTPS protocol - serves content on port 443 with SSL/TLS encryption
+    
+    /// HTTPS protocol - serves content on port 443 with SSL/TLS encryption.
+    /// 
+    /// # Characteristics
+    /// - TLS encryption
+    /// - Port 443
+    /// - Requires SSL certificates
+    /// - Recommended for production
     Https,
 }
 
@@ -83,14 +110,36 @@ pub enum NginxProtocol {
 /// println!("Site: {}", config.site_name);
 /// println!("Root: {}", config.root);
 /// ```
+///
+/// # Thread Safety
+///
+/// This struct does not implement `Send` or `Sync` by default, as it's
+/// intended for single-threaded configuration generation.
 pub struct NginxConfig {
-    /// The domain name of the site
+    /// The domain name of the site.
+    /// 
+    /// Must be a valid domain name according to RFC 1035.
+    /// Examples: "example.com", "blog.example.com", "test.local"
     pub site_name: String,
-    /// The document root directory for the site
+    
+    /// The document root directory for the site.
+    /// 
+    /// This is where all site files (HTML, PHP, assets) are stored.
+    /// Example: "/var/www/html/example.com"
     pub root: String,
-    /// Full path to the Nginx configuration file
+    
+    /// Full path to the Nginx configuration file.
+    /// 
+    /// The complete path including filename where the Nginx
+    /// configuration will be written.
+    /// Example: "/etc/nginx/conf.d/example.com.conf"
     pub nginx_config_file_path: String,
-    /// Optional SSL certificate directory path
+    
+    /// Optional SSL certificate directory path.
+    /// 
+    /// Contains the path to SSL certificates when SSL is enabled.
+    /// Structure: `{SITES_SSL_PATH}/{site_name}/{site_name}`
+    /// Example: Some("/etc/nginx/ssl/example.com/example.com")
     pub ssl_root: Option<String>,
 }
 
@@ -133,6 +182,13 @@ impl NginxConfig {
     /// assert_eq!(config.nginx_config_file_path, "/etc/nginx/sites-enabled/shop.example.com.conf");
     /// assert!(config.ssl_root.is_some());
     /// ```
+    ///
+    /// # Design Rationale
+    ///
+    /// The constructor encapsulates path construction logic to:
+    /// - Ensure consistent path formatting
+    /// - Prevent manual path construction errors
+    /// - Centralize path generation logic
     pub fn new(site_name: String, sites_path: String, nginx_config: String, use_ssl: bool) -> Self {
         let ssl_path = use_ssl.then(|| format!("{}/{}", SITES_SSL_PATH, site_name));
         let nginx_config_file_path = format!("{}/{}.conf", nginx_config, site_name);
@@ -159,7 +215,7 @@ impl NginxConfig {
     ///
     /// # Validation Steps
     ///
-    /// 1. **Site name validation**: Ensures the domain name is valid
+    /// 1. **Site name validation**: Ensures the domain name is valid per RFC 1035
     /// 2. **Path validation**: Verifies all required directories exist
     /// 3. **Security checks**: Prevents path traversal attacks
     ///
@@ -186,9 +242,18 @@ impl NginxConfig {
     /// }
     /// ```
     ///
+    /// # Security Considerations
+    ///
+    /// This method provides defense against:
+    /// - Path traversal attacks using `..` or absolute paths
+    /// - Invalid domain names that could cause nginx errors
+    /// - Missing parent directories that would cause write failures
+    ///
     /// # TODO
     /// 
     /// - Aggregate all validation errors to return at once for better UX
+    /// - Add DNS resolution check for the domain
+    /// - Validate nginx user has write permissions
     pub fn validate(&self) -> Result<(), String> {
         // TODO: Do all confirmations (if possible) and concatenate errors to return all at once, so, all issues can be fixed at once.
         // 1. Validate site name (domain name validation)
@@ -221,6 +286,13 @@ impl NginxConfig {
     /// * `Ok(())` - If all paths are valid and accessible
     /// * `Err(String)` - If any path is invalid, with details about which path failed
     ///
+    /// # Validation Logic
+    ///
+    /// For each path, the method checks:
+    /// 1. The parent directory exists (not the final path itself)
+    /// 2. The parent is actually a directory (not a file)
+    /// 3. SSL paths are validated only when SSL is enabled
+    ///
     /// # Errors
     ///
     /// Returns an error if:
@@ -232,7 +304,13 @@ impl NginxConfig {
     /// # Note
     ///
     /// This method checks parent directories, not the final paths themselves,
-    /// as those will be created during site setup.
+    /// as those will be created during site setup. This allows validation
+    /// before the site is actually created.
+    ///
+    /// # Implementation Details
+    ///
+    /// Uses `Path::parent()` to get parent directories, which returns `None`
+    /// for root paths. The method gracefully handles this case.
     fn validate_paths(&self) -> Result<(), String> {
         // Check if root directory parent exists
         if let Some(parent) = Path::new(&self.root).parent() {
@@ -318,6 +396,12 @@ impl NginxConfig {
     ///
     /// - `NginxProtocol::Http` uses `NGINX_HTTP_TEMPLATE`
     /// - `NginxProtocol::Https` uses `NGINX_HTTPS_TEMPLATE`
+    ///
+    /// # Performance
+    ///
+    /// Template replacement is performed using `String::replace()` which
+    /// allocates new strings. For large templates or high-frequency generation,
+    /// consider caching generated configurations.
     pub fn generate_config(&self, protocol: NginxProtocol) -> String {
         let mut config = match protocol {
             NginxProtocol::Http => NGINX_HTTP_TEMPLATE.to_string(),
@@ -356,6 +440,15 @@ impl NginxConfig {
 /// * `Ok(())` - If the Nginx configuration is valid
 /// * `Err(String)` - If the configuration is invalid, containing the nginx error output
 ///
+/// # Command Execution
+///
+/// Runs: `nginx -t`
+/// 
+/// This command:
+/// - Tests the configuration file syntax
+/// - Tests the configuration file references
+/// - Does NOT actually start or reload nginx
+///
 /// # Errors
 ///
 /// This function will return an error if:
@@ -363,6 +456,7 @@ impl NginxConfig {
 /// - The Nginx configuration contains syntax errors
 /// - Configuration files reference missing includes or upstreams
 /// - There are permission issues with configuration files
+/// - SSL certificates are missing or invalid
 ///
 /// # Examples
 ///
@@ -381,12 +475,20 @@ impl NginxConfig {
 /// }
 /// ```
 ///
-/// # Note
+/// # System Requirements
 ///
-/// This function requires:
-/// - Nginx to be installed on the system
-/// - The user to have permission to run `nginx -t`
+/// - Nginx must be installed on the system
+/// - The `nginx` command must be in the system PATH
+/// - User must have permission to run `nginx -t`
 /// - Typically requires sudo/root privileges in production
+///
+/// # Best Practices
+///
+/// Always call this function:
+/// - Before reloading nginx after configuration changes
+/// - After generating new site configurations
+/// - Before removing site configurations
+/// - As part of CI/CD deployment pipelines
 pub fn validate_nginx_configuration() -> Result<(), String> {
     // Execute nginx -t command
     let output = Command::new("nginx")
@@ -425,10 +527,21 @@ pub fn validate_nginx_configuration() -> Result<(), String> {
 ///
 /// # How It Works
 ///
-/// 1. Creates a temporary main configuration file
-/// 2. Includes the target configuration file in the HTTP context
-/// 3. Runs `nginx -t` against the temporary configuration
-/// 4. Cleans up the temporary file
+/// 1. Creates a temporary main configuration file in `/tmp`
+/// 2. Writes minimal nginx config that includes the target file
+/// 3. Runs `nginx -t -c {temp_config}` for isolated validation
+/// 4. Cleans up the temporary file regardless of outcome
+///
+/// # Temporary Configuration Structure
+///
+/// ```nginx
+/// events {
+///     worker_connections 1024;
+/// }
+/// http {
+///     include /path/to/target/config.conf;
+/// }
+/// ```
 ///
 /// # Errors
 ///
@@ -437,6 +550,7 @@ pub fn validate_nginx_configuration() -> Result<(), String> {
 /// - The nginx command fails to execute
 /// - The configuration file contains syntax errors
 /// - The configuration references undefined variables or upstreams
+/// - SSL certificates referenced in the config don't exist
 ///
 /// # Examples
 ///
@@ -451,11 +565,20 @@ pub fn validate_nginx_configuration() -> Result<(), String> {
 /// }
 /// ```
 ///
-/// # Security Note
+/// # Security Considerations
 ///
-/// The temporary file is created in `/tmp` with a unique name based
-/// on the process ID to avoid conflicts. The file is always cleaned up,
-/// even if validation fails.
+/// - Temporary file uses process ID to ensure uniqueness
+/// - File is created in `/tmp` with default permissions
+/// - Always cleaned up, even on error
+/// - No sensitive data is written to the temporary file
+///
+/// # Limitations
+///
+/// This validation is isolated and may not catch issues that depend on:
+/// - Global nginx settings
+/// - Shared upstreams or variables
+/// - Include files from the main configuration
+/// - System resource limits
 pub fn validate_nginx_config_file(config_path: &str) -> Result<(), String> {
     use std::fs;
 
@@ -499,6 +622,7 @@ mod tests {
     use super::*;
     use crate::constants::{NGINX_HTTP_CONFIG_MARKER, NGINX_HTTPS_CONFIG_MARKER};
 
+    /// Tests that HTTP configuration is generated correctly
     #[test]
     fn test_generate_http_config() {
         let config = NginxConfig::new(
@@ -527,6 +651,7 @@ mod tests {
         assert!(generated.contains("/var/www/html/test.example.com"));
     }
 
+    /// Tests that HTTPS configuration is generated correctly with SSL paths
     #[test]
     fn test_generate_https_config() {
         let config = NginxConfig::new(
@@ -557,6 +682,7 @@ mod tests {
         assert!(generated.contains("/etc/nginx/ssl/secure.example.com"));
     }
 
+    /// Tests that generating HTTPS config without SSL path causes a panic
     #[test]
     #[should_panic(expected = "SSL path must be provided for HTTPS configuration")]
     fn test_https_without_ssl_path_panics() {
@@ -571,6 +697,7 @@ mod tests {
         config.generate_config(NginxProtocol::Https);
     }
 
+    /// Tests configuration generation with special characters in domain name
     #[test]
     fn test_generate_config_special_characters_in_name() {
         let config = NginxConfig::new(
@@ -592,6 +719,7 @@ mod tests {
         assert!(https_generated.contains("/etc/nginx/ssl/my-site.sub.example.com"));
     }
 
+    /// Tests that all template placeholders are properly replaced
     #[test]
     fn test_template_replacement_completeness() {
         let config = NginxConfig::new(
@@ -616,6 +744,7 @@ mod tests {
         assert!(https_generated.contains("/custom/ssl/complete.test.com"));
     }
 
+    /// Tests NginxProtocol enum equality and inequality
     #[test]
     fn test_protocol_enum_equality() {
         assert_eq!(NginxProtocol::Http, NginxProtocol::Http);
@@ -623,6 +752,7 @@ mod tests {
         assert_ne!(NginxProtocol::Http, NginxProtocol::Https);
     }
 
+    /// Tests that enabling SSL but requesting HTTP protocol works correctly
     #[test]
     fn test_generate_config_with_ssl_but_http_protocol() {
         let config = NginxConfig::new(
@@ -646,6 +776,7 @@ mod tests {
 mod validation_tests {
     use super::*;
 
+    /// Integration test for system nginx validation (requires nginx installed)
     #[test]
     #[ignore] // Requires nginx to be installed
     fn test_validate_nginx_configuration() {

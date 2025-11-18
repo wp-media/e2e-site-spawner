@@ -1,21 +1,347 @@
-// Nginx configuration constants
+//! Global constants for the e2e-site-spawner application.
+//!
+//! This module contains all configuration constants used throughout the application,
+//! including file paths, templates, and database settings. These constants provide
+//! centralized configuration management, making it easy to adjust settings without
+//! modifying code logic.
+//!
+//! # Organization
+//!
+//! Constants are grouped by their functional area:
+//! - **Nginx Configuration**: Paths and templates for web server setup
+//! - **WordPress**: Download URLs and installation settings
+//! - **Database**: MySQL/MariaDB connection and configuration parameters
+//!
+//! # Usage
+//!
+//! ```
+//! use e2e_site_spawner::constants::{SITES_PATH, DB_USER};
+//! 
+//! println!("Sites will be created in: {}", SITES_PATH);
+//! println!("WordPress database user: {}", DB_USER);
+//! ```
+
+// ============================================================================
+// Nginx Configuration Constants
+// ============================================================================
+
+/// Base directory where all WordPress sites are installed.
+///
+/// This is the document root for all spawned sites. Each site will be created
+/// as a subdirectory within this path, named after the site's domain.
+///
+/// # Default Value
+/// `/var/www/html` - Standard web content directory on Unix/Linux systems
+///
+/// # Directory Structure
+/// ```text
+/// /var/www/html/
+/// ├── example.com/       # First site
+/// ├── blog.example.com/  # Second site
+/// └── test.example.com/  # Third site
+/// ```
+///
+/// # Requirements
+/// - Directory must exist and be writable by the web server user
+/// - Typically owned by `www-data` or `nginx` user
+/// - Recommended permissions: 755
 pub const SITES_PATH: &'static str = "/var/www/html";
+
+/// Base directory for SSL certificate storage.
+///
+/// This directory contains subdirectories for each site's SSL certificates.
+/// Certificates are organized by domain name to prevent conflicts.
+///
+/// # Default Value
+/// `/etc/nginx/ssl` - Standard SSL certificate location for Nginx
+///
+/// # Directory Structure
+/// ```text
+/// /etc/nginx/ssl/
+/// ├── example.com/
+/// │   ├── privkey.pem     # Private key
+/// │   └── fullchain.pem   # Certificate chain
+/// └── blog.example.com/
+///     ├── privkey.pem
+///     └── fullchain.pem
+/// ```
+///
+/// # Security
+/// - Should have restricted permissions (typically 700)
+/// - Only readable by root and nginx process
+/// - Contains sensitive private key material
 pub const SITES_SSL_PATH: &'static str = "/etc/nginx/ssl";
+
+/// Directory for Nginx site configuration files.
+///
+/// Each spawned site gets its own `.conf` file in this directory.
+/// Nginx automatically includes all `.conf` files from this directory.
+///
+/// # Default Value
+/// `/etc/nginx/conf.d` - Standard Nginx configuration directory
+///
+/// # File Naming
+/// Configuration files are named as `{domain}.conf`
+/// - `example.com.conf`
+/// - `blog.example.com.conf`
+///
+/// # Nginx Include
+/// Ensure your main nginx.conf includes:
+/// ```nginx
+/// include /etc/nginx/conf.d/*.conf;
+/// ```
 pub const NGINX_CONF_D_PATH: &'static str = "/etc/nginx/conf.d";
+
+/// HTTP configuration template for Nginx sites.
+///
+/// This template is used for sites without SSL certificates.
+/// It configures Nginx to serve the site over HTTP (port 80).
+///
+/// # Template Variables
+/// The template contains placeholders that are replaced during site creation:
+/// - `!{{site_name}}!` - The domain name
+/// - `!{{site_path}}!` - The document root path
+///
+/// # Contents
+/// Loaded at compile time from `./assets/http.conf.template`
+///
+/// # Features
+/// - Basic HTTP server configuration
+/// - PHP-FPM integration for WordPress
+/// - Standard WordPress rewrite rules
+/// - Security headers and restrictions
 pub const NGINX_HTTP_TEMPLATE: &'static str = include_str!("./assets/http.conf.template");
+
+/// HTTPS configuration template for Nginx sites with SSL.
+///
+/// This template is used for sites with SSL certificates enabled.
+/// It configures Nginx to serve the site over HTTPS (port 443) with
+/// TLS encryption.
+///
+/// # Template Variables
+/// The template contains placeholders that are replaced during site creation:
+/// - `!{{site_name}}!` - The domain name
+/// - `!{{site_path}}!` - The document root path  
+/// - `!{{ssl_path}}!` - Path to SSL certificates
+///
+/// # Contents
+/// Loaded at compile time from `./assets/https.conf.template`
+///
+/// # Features
+/// - TLS 1.2/1.3 configuration
+/// - SSL certificate paths
+/// - HTTP/2 support
+/// - Security headers (HSTS, etc.)
+/// - HTTP to HTTPS redirect
 pub const NGINX_HTTPS_TEMPLATE: &'static str = include_str!("./assets/https.conf.template");
+
+/// Marker comment identifying HTTP configurations.
+///
+/// This unique marker is embedded in HTTP configuration files to identify
+/// them as generated by the e2e-site-spawner. Used for:
+/// - Configuration validation
+/// - Cleanup operations
+/// - Distinguishing managed vs manually created configs
+///
+/// # Format
+/// Appears as a comment in nginx configuration files:
+/// ```nginx
+/// # ######E2SP-HTTP-CONFIGURATION######
+/// server {
+///     # ... configuration ...
+/// }
+/// ```
 pub const NGINX_HTTP_CONFIG_MARKER: &'static str = "######E2SP-HTTP-CONFIGURATION######";
+
+/// Marker comment identifying HTTPS configurations.
+///
+/// This unique marker is embedded in HTTPS configuration files to identify
+/// them as generated by the e2e-site-spawner. Used for:
+/// - Configuration validation
+/// - Cleanup operations
+/// - Distinguishing managed vs manually created configs
+///
+/// # Format
+/// Appears as a comment in nginx configuration files:
+/// ```nginx
+/// # ######E2SP-HTTPS-CONFIGURATION######
+/// server {
+///     # ... HTTPS configuration ...
+/// }
+/// ```
 pub const NGINX_HTTPS_CONFIG_MARKER: &'static str = "######E2SP-HTTPS-CONFIGURATION######";
+
+/// Default HTML index file template.
+///
+/// This HTML content is used as a placeholder index.html file when creating
+/// sites in HTML-only mode (without WordPress). Provides a simple landing page
+/// indicating the site has been successfully created.
+///
+/// # Contents
+/// Loaded at compile time from `./assets/default-index.html`
+///
+/// # Usage
+/// Used when spawning a site with `--html` flag, creating a static HTML site
+/// instead of installing WordPress.
+///
+/// # Features
+/// - Responsive design
+/// - E2E Site Spawner branding
+/// - Instructions for next steps
 pub const HTML_DEFAULT_INDEX_FILE: &'static str = include_str!("./assets/default-index.html");
 
-// WordPress download URL constant
+// ============================================================================
+// WordPress Configuration Constants
+// ============================================================================
+
+/// URL for downloading the latest WordPress release.
+///
+/// Points to the official WordPress.org download for the latest stable version.
+/// This archive is downloaded and extracted when creating new WordPress sites.
+///
+/// # Format
+/// - File type: tar.gz archive
+/// - Contents: Complete WordPress installation
+/// - Version: Always the latest stable release
+///
+/// # Network Requirements
+/// - Requires internet connectivity
+/// - May be blocked by corporate firewalls
+/// - Consider using a local mirror for air-gapped environments
+///
+/// # Alternative Sources
+/// For specific versions, use:
+/// - `https://wordpress.org/wordpress-{version}.tar.gz`
+/// - Example: `https://wordpress.org/wordpress-6.4.1.tar.gz`
 pub const LATEST_WORDPRESS_URL: &'static str = "https://wordpress.org/latest.tar.gz";
 
-// Database configuration constants
+// ============================================================================
+// Database Configuration Constants
+// ============================================================================
+
+/// MySQL/MariaDB root user for administrative operations.
+///
+/// Used for creating databases and granting privileges. This user must have
+/// sufficient privileges to:
+/// - CREATE databases
+/// - GRANT privileges to other users
+/// - FLUSH privileges
+///
+/// # Security Warning
+/// In production environments, consider using a dedicated admin user
+/// instead of root for better security isolation.
 pub const DB_ROOT_USER: &'static str = "root";
+
+/// WordPress database user name.
+///
+/// This is the MySQL/MariaDB user that WordPress will use to connect to
+/// its database. This user is granted full privileges on each WordPress
+/// database but has no privileges on other databases.
+///
+/// # Privileges
+/// The WordPress user is granted:
+/// - ALL PRIVILEGES on `wp_*` databases
+/// - No global privileges
+/// - Access only from localhost
+///
+/// # Security
+/// - Should be created with a strong password in production
+/// - Limited to localhost connections only
+/// - Cannot access system databases
 pub const DB_USER: &'static str = "wordpress";
+
+/// Default password for the WordPress database user.
+///
+/// This password is used for all WordPress database connections in the
+/// development environment.
+///
+/// # ⚠️ Security Warning
+/// This default password is for **development environments only**.
+/// In production:
+/// - Generate unique, strong passwords for each site
+/// - Store passwords securely (environment variables, secrets manager)
+/// - Never commit production passwords to version control
+///
+/// # Password Requirements
+/// For production, passwords should:
+/// - Be at least 12 characters long
+/// - Include mixed case, numbers, and special characters
+/// - Be unique per installation
 pub const DB_PASSWORD: &'static str = "pleaseadvise";
+
+/// Database server hostname or IP address.
+///
+/// Specifies where the MySQL/MariaDB server is running.
+///
+/// # Default Value
+/// `localhost` - Database on the same server
+///
+/// # Alternative Values
+/// - `127.0.0.1` - IPv4 loopback
+/// - `::1` - IPv6 loopback
+/// - `mysql.example.com` - Remote database server
+/// - `192.168.1.100` - Database server by IP
+///
+/// # Connection Method
+/// - `localhost` uses Unix socket (faster for local connections)
+/// - IP addresses use TCP/IP connection
 pub const DB_HOST: &'static str = "localhost";
+
+/// MySQL/MariaDB server port number.
+///
+/// Standard port for MySQL/MariaDB connections.
+///
+/// # Default Value
+/// `3306` - Standard MySQL/MariaDB port
+///
+/// # Common Alternatives
+/// - `3307` - Common alternative when 3306 is in use
+/// - `33060` - MySQL X Protocol port
+///
+/// # Firewall Considerations
+/// If using a remote database, ensure this port is:
+/// - Open in the firewall
+/// - Not exposed to the public internet
+/// - Preferably accessed through VPN or private network
 pub const DB_PORT: u16 = 3306;
+
+/// Character set for WordPress databases.
+///
+/// UTF8MB4 provides full Unicode support including emojis and special characters.
+///
+/// # Default Value
+/// `utf8mb4` - Full 4-byte UTF-8 support
+///
+/// # Why UTF8MB4?
+/// - Supports all Unicode characters (including emojis 🎉)
+/// - Required for modern WordPress installations
+/// - Backward compatible with utf8 (3-byte UTF-8)
+/// - Recommended by WordPress.org
+///
+/// # Compatibility
+/// Requires:
+/// - MySQL 5.5.3+ or MariaDB 5.5+
+/// - WordPress 4.2+
 pub const DB_CHARSET: &'static str = "utf8mb4";
+
+/// Collation for WordPress databases.
+///
+/// Defines how string comparison and sorting works in the database.
+///
+/// # Default Value
+/// `utf8mb4_general_ci` - Case-insensitive, accent-insensitive collation
+///
+/// # Collation Characteristics
+/// - `utf8mb4` - Character set
+/// - `general` - General purpose sorting rules
+/// - `ci` - Case Insensitive
+///
+/// # Alternatives
+/// - `utf8mb4_unicode_ci` - More accurate but slightly slower
+/// - `utf8mb4_bin` - Binary comparison (case-sensitive)
+/// - `utf8mb4_unicode_520_ci` - Unicode 5.2.0 standard
+///
+/// # WordPress Compatibility
+/// WordPress works with any utf8mb4 collation, but `utf8mb4_general_ci`
+/// provides the best balance of performance and compatibility.
 pub const DB_COLLATION: &'static str = "utf8mb4_general_ci";

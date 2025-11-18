@@ -1,3 +1,23 @@
+//! Site management utilities for file system operations.
+//!
+//! This module provides functions for managing site directories, files, and WordPress installations.
+//! It includes comprehensive error handling, atomic file operations, and rollback capabilities
+//! for failed site creation attempts.
+//!
+//! # Security Features
+//!
+//! - Atomic file creation to prevent race conditions
+//! - Permission management for Unix systems
+//! - Path validation to prevent traversal attacks
+//! - Ownership management for web server compatibility
+//!
+//! # Core Functionality
+//!
+//! - Site directory creation and removal
+//! - WordPress installation and configuration
+//! - Rollback mechanism for failed operations
+//! - File and directory permission management
+
 // use predicates::path;
 use std::fs::OpenOptions;
 use std::os::unix::fs::PermissionsExt;
@@ -13,14 +33,24 @@ use crate::utils::sites;
 use nix::unistd::Group;
 use rand::Rng;
 
-/// Error type for file creation operations
+/// Error type for file creation operations.
+///
+/// Provides specific error variants for different failure scenarios
+/// in file and directory operations, enabling precise error handling
+/// and meaningful error messages to users.
 #[derive(Debug)]
 pub enum FileCreationError {
+    /// Path validation failed (empty, invalid characters, etc.)
     InvalidPath(String),
+    /// Operation failed due to insufficient permissions
     InsufficientPermissions(String),
+    /// Directory creation operation failed
     DirectoryCreationFailed(String),
+    /// File write operation failed
     FileWriteFailed(String),
+    /// Failed to set file or directory permissions
     PermissionSetFailed(String),
+    /// Detected attempt at path traversal attack
     PathTraversal(String),
 }
 
@@ -45,14 +75,39 @@ impl std::fmt::Display for FileCreationError {
 
 impl std::error::Error for FileCreationError {}
 
-/// All step groups for easier iteration
+/// Groups of related steps for coordinated rollback.
+///
+/// These groups ensure that related operations (like all nginx configs
+/// or all SSL files) are treated as a unit during rollback, preventing
+/// redundant or conflicting cleanup operations.
 const STEP_GROUPS: &[&[SpawnSteps]] = &[
     &REMOVE_NGINX_CONFIG,
     &REMOVE_SITE_DIRECTORY,
     &REMOVE_SSL_DIRECTORY,
 ];
 
-/// Helper function to check if a step from the same group has been reverted
+/// Checks if a step from the same group has already been reverted.
+///
+/// This helper function prevents duplicate rollback operations by checking
+/// if any step from the same logical group has already been processed.
+/// Uses `std::mem::discriminant` to compare enum variants regardless of
+/// their associated data.
+///
+/// # Arguments
+///
+/// * `step` - The step to check
+/// * `reverted_steps` - List of steps that have already been reverted
+///
+/// # Returns
+///
+/// * `true` if a step from the same group has been reverted
+/// * `false` if this is the first step from its group to be reverted
+///
+/// # Implementation Details
+///
+/// Uses discriminant comparison to handle enum variants with data,
+/// allowing `CreateDatabase("db1")` and `CreateDatabase("db2")` to be
+/// recognized as the same step type.
 fn is_step_group_reverted(step: &SpawnSteps, reverted_steps: &[SpawnSteps]) -> bool {
     // Find which group this step belongs to
     for group in STEP_GROUPS {
@@ -76,6 +131,35 @@ fn is_step_group_reverted(step: &SpawnSteps, reverted_steps: &[SpawnSteps]) -> b
             .any(|s| matches!(s, SpawnSteps::CreateDatabase(_)))
 }
 
+/// Reverts all completed steps when site creation fails.
+///
+/// This function performs a coordinated rollback of all operations that were
+/// successfully completed before a failure occurred. It processes steps in
+/// reverse order to ensure proper cleanup and uses step groups to prevent
+/// redundant operations.
+///
+/// # Arguments
+///
+/// * `site_name` - Name of the site being reverted
+/// * `steps` - Vector of steps that were completed before failure
+/// * `nginx_config` - Nginx configuration containing paths to clean up
+///
+/// # Behavior
+///
+/// 1. Processes steps in reverse order (LIFO)
+/// 2. Skips steps if another step from the same group was already reverted
+/// 3. Continues reverting even if individual rollback operations fail
+/// 4. Logs all operations and errors
+/// 5. Exits the process with status code 1 after completion
+///
+/// # Exit Status
+///
+/// Always exits with status code 1 to indicate site creation failure.
+///
+/// # Error Handling
+///
+/// Individual rollback failures are logged but don't stop the overall
+/// rollback process, ensuring maximum cleanup even in error conditions.
 pub fn revert_site_spawn(
     site_name: &str,
     steps: &Vec<SpawnSteps>,
@@ -163,6 +247,50 @@ pub fn revert_site_spawn(
     process::exit(1);
 }
 
+/// Downloads and extracts WordPress into the specified site directory.
+///
+/// This function performs a complete WordPress installation by:
+/// 1. Downloading the latest WordPress archive from wordpress.org
+/// 2. Extracting it directly into the site directory
+/// 3. Removing the temporary archive file
+///
+/// # Arguments
+///
+/// * `site_path` - The directory path where WordPress should be installed
+///
+/// # Returns
+///
+/// * `Ok(())` if WordPress was successfully installed
+/// * `Err(FileCreationError)` if download, extraction, or cleanup failed
+///
+/// # Implementation Details
+///
+/// Uses shell commands via `sh -c` to:
+/// - Download with `curl` to a temporary file
+/// - Extract with `tar` using `--strip-components=1` to avoid nested directories
+/// - Clean up the temporary archive
+///
+/// # Network Requirements
+///
+/// Requires internet connection to download from wordpress.org.
+/// The download URL is configured in `constants::LATEST_WORDPRESS_URL`.
+///
+/// # Examples
+///
+/// ```
+/// match put_wordpress_in_site_directory("/var/www/mysite") {
+///     Ok(()) => println!("WordPress installed successfully"),
+///     Err(e) => eprintln!("Installation failed: {}", e),
+/// }
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Network connection fails
+/// - Insufficient disk space
+/// - Site directory doesn't exist or isn't writable
+/// - Archive extraction fails
 pub fn put_wordpress_in_site_directory(site_path: &str) -> Result<(), FileCreationError> {
     let output = std::process::Command::new("sh")
         .arg("-c")
@@ -184,6 +312,51 @@ pub fn put_wordpress_in_site_directory(site_path: &str) -> Result<(), FileCreati
 
     Ok(())
 }
+
+/// Creates a WordPress configuration file with database credentials.
+///
+/// Generates a wp-config.php file by reading the wp-config-sample.php template
+/// and replacing placeholders with actual database credentials and security keys.
+///
+/// # Arguments
+///
+/// * `site_path` - Directory containing the WordPress installation
+/// * `db_name` - Name of the MySQL database
+/// * `db_user` - Database username
+/// * `db_password` - Database password
+/// * `db_host` - Database host (typically "localhost")
+/// * `db_charset` - Database character set (typically "utf8mb4")
+///
+/// # Returns
+///
+/// * `Ok(())` if wp-config.php was created successfully
+/// * `Err(FileCreationError)` if template reading or file creation failed
+///
+/// # Security
+///
+/// - Generates unique 64-character salt keys for each WordPress security constant
+/// - Uses atomic file creation to prevent race conditions
+/// - Sets appropriate file permissions for web server access
+///
+/// # Examples
+///
+/// ```
+/// create_wp_config_file(
+///     "/var/www/mysite",
+///     "wp_mysite",
+///     "wordpress",
+///     "secretpass",
+///     "localhost",
+///     "utf8mb4"
+/// )?;
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - wp-config-sample.php doesn't exist or isn't readable
+/// - wp-config.php already exists
+/// - File write operations fail
 pub fn create_wp_config_file(
     site_path: &str,
     db_name: &str,
@@ -209,6 +382,54 @@ pub fn create_wp_config_file(
 
     Ok(())
 }
+
+/// Generates WordPress configuration content from the sample template.
+///
+/// Replaces all placeholder values in wp-config-sample.php with actual
+/// configuration values and generates unique security salt keys.
+///
+/// # Arguments
+///
+/// * `db_name` - Database name to replace "database_name_here"
+/// * `db_user` - Username to replace "username_here"
+/// * `db_password` - Password to replace "password_here"
+/// * `db_host` - Host to replace "localhost"
+/// * `db_charset` - Character set to replace "utf8"
+/// * `wp_config_sample` - The template content from wp-config-sample.php
+///
+/// # Returns
+///
+/// * `Ok(String)` containing the complete wp-config.php content
+/// * `Err(FileCreationError)` if generation fails
+///
+/// # Security Keys
+///
+/// Replaces all instances of "put your unique phrase here" with
+/// cryptographically secure 64-character random strings using
+/// alphanumeric characters.
+///
+/// # Template Replacements
+///
+/// - `database_name_here` → actual database name
+/// - `username_here` → database username
+/// - `password_here` → database password
+/// - `localhost` → database host
+/// - `utf8` → database charset (typically utf8mb4)
+/// - `put your unique phrase here` → unique 64-char salt keys
+///
+/// # Examples
+///
+/// ```
+/// let sample = fs::read_to_string("wp-config-sample.php")?;
+/// let config = generate_wp_config_content_from_sample(
+///     "wp_blog",
+///     "wpuser",
+///     "pass123",
+///     "localhost",
+///     "utf8mb4",
+///     sample
+/// )?;
+/// ```
 pub fn generate_wp_config_content_from_sample(
     db_name: &str,
     db_user: &str,
@@ -237,6 +458,32 @@ pub fn generate_wp_config_content_from_sample(
 
     Ok(wp_config_content)
 }
+
+/// Generates a cryptographically secure salt key for WordPress.
+///
+/// Creates a 64-character random string using alphanumeric characters
+/// suitable for WordPress security keys and salts.
+///
+/// # Returns
+///
+/// A 64-character string containing random alphanumeric characters.
+///
+/// # Security
+///
+/// Uses the cryptographically secure random number generator from
+/// the `rand` crate to ensure unpredictability.
+///
+/// # WordPress Constants
+///
+/// Used for generating values for:
+/// - AUTH_KEY
+/// - SECURE_AUTH_KEY
+/// - LOGGED_IN_KEY
+/// - NONCE_KEY
+/// - AUTH_SALT
+/// - SECURE_AUTH_SALT
+/// - LOGGED_IN_SALT
+/// - NONCE_SALT
 fn create_salt_key() -> String {
     rand::rng()
         .sample_iter(&rand::distr::Alphanumeric)
@@ -244,6 +491,48 @@ fn create_salt_key() -> String {
         .map(char::from)
         .collect()
 }
+
+/// Creates a directory with specified permissions if it doesn't exist.
+///
+/// This function creates a directory (including parent directories) and
+/// optionally sets Unix permissions. It fails if the directory already exists
+/// to prevent accidental overwrites.
+///
+/// # Arguments
+///
+/// * `dir_path` - Path to the directory to create
+/// * `permissions` - Optional Unix permission mode (e.g., 0o755)
+///
+/// # Returns
+///
+/// * `Ok(())` if the directory was created successfully
+/// * `Err(FileCreationError)` if creation failed or directory exists
+///
+/// # Permissions
+///
+/// Common permission values:
+/// - `0o755` - rwxr-xr-x (owner full, others read/execute)
+/// - `0o750` - rwxr-x--- (owner full, group read/execute, others none)
+/// - `0o777` - rwxrwxrwx (full permissions for all)
+/// - `0o700` - rwx------ (owner only)
+///
+/// # Examples
+///
+/// ```
+/// // Create directory with standard web permissions
+/// create_directory_if_not_exists("/var/www/mysite", Some(0o755))?;
+///
+/// // Create directory with default permissions
+/// create_directory_if_not_exists("/tmp/test", None)?;
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Directory already exists
+/// - Parent directory doesn't exist and can't be created
+/// - Insufficient permissions to create directory
+/// - Permission setting fails (Unix only)
 pub fn create_directory_if_not_exists(
     dir_path: &str,
     permissions: Option<u32>,
@@ -278,6 +567,54 @@ pub fn create_directory_if_not_exists(
     Ok(())
 }
 
+/// Creates a file with content if it doesn't exist.
+///
+/// Atomically creates a new file with the specified content and optional
+/// Unix permissions. Fails if the file already exists to prevent
+/// accidental overwrites.
+///
+/// # Arguments
+///
+/// * `path` - Path to the file to create
+/// * `content` - Content to write to the file
+/// * `permissions` - Optional Unix permission mode
+///
+/// # Returns
+///
+/// * `Ok(())` if the file was created successfully
+/// * `Err(FileCreationError)` if creation failed or file exists
+///
+/// # Atomic Creation
+///
+/// Uses `create_new` flag to ensure atomic check-and-create operation,
+/// preventing TOCTOU (time-of-check-time-of-use) vulnerabilities.
+///
+/// # Examples
+///
+/// ```
+/// // Create configuration file with restricted permissions
+/// create_file_with_content_if_not_exists(
+///     "/etc/myapp/config.conf",
+///     "key=value\n",
+///     Some(0o600)  // rw-------
+/// )?;
+///
+/// // Create public HTML file
+/// create_file_with_content_if_not_exists(
+///     "/var/www/index.html",
+///     "<h1>Welcome</h1>",
+///     Some(0o644)  // rw-r--r--
+/// )?;
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - File already exists
+/// - Parent directory doesn't exist
+/// - Insufficient permissions to create file
+/// - Write operation fails
+/// - Permission setting fails (Unix only)
 pub fn create_file_with_content_if_not_exists(
     path: &str,
     content: &str,
@@ -329,43 +666,64 @@ pub fn create_file_with_content_if_not_exists(
 
 /// Changes the ownership of a file or directory at the given path.
 ///
+/// Uses the POSIX `chown` system call to change user and/or group ownership.
+/// Either user or group can be changed independently, or both simultaneously.
+///
 /// # Arguments
 ///
-/// * `user_name` - An `Option<&str>` specifying the username to set as the new owner.
-///                 If `None`, the user (owner) will not be changed.
-/// * `group_name` - An `Option<&str>` specifying the group name to set as the new group owner.
-///                  If `None`, the group will not be changed.
-/// * `path` - The path to the file or directory whose ownership should be changed.
+/// * `user_name` - Optional username to set as owner. If `None`, owner unchanged.
+/// * `group_name` - Optional group name to set. If `None`, group unchanged.
+/// * `path` - Path to the file or directory to modify
 ///
 /// # Returns
 ///
-/// * `Ok(())` if the ownership change was successful.
-/// * `Err(FileCreationError)` if the user or group does not exist, or if the ownership change fails.
+/// * `Ok(())` if ownership change was successful
+/// * `Err(FileCreationError)` if user/group doesn't exist or operation failed
 ///
 /// # Behavior
 ///
-/// - If `user_name` is `Some` and `group_name` is `None`, only the user (owner) will be changed.
-/// - If `user_name` is `None` and `group_name` is `Some`, only the group will be changed.
-/// - If both are `Some`, both user and group will be changed.
-/// - If both are `None`, nothing will be changed (no-op).
+/// - `Some(user)` + `None` → Changes only the user (owner)
+/// - `None` + `Some(group)` → Changes only the group
+/// - `Some(user)` + `Some(group)` → Changes both user and group
+/// - `None` + `None` → No-op (no changes made)
 ///
-/// This function uses [`nix::unistd::chown`](https://docs.rs/nix/latest/nix/unistd/fn.chown.html),
-/// which maps to the POSIX `chown(2)` system call. Passing `None` for either user or group
-/// leaves that attribute unchanged (see [chown(2) man page](https://man7.org/linux/man-pages/man2/chown.2.html)).
+/// # Examples
 ///
-/// # Example
+/// ```
+/// // Change only the owner to www-data
+/// set_path_owner(Some("www-data"), None, "/var/www/html")?;
 ///
-/// ````rust
-/// set_path_owner(Some("www-data"), None, "/var/www/example")?; // Change only user
-/// set_path_owner(None, Some("www-data"), "/var/www/example")?; // Change only group
-/// set_path_owner(Some("www-data"), Some("www-data"), "/var/www/example")?; // Change both
-/// set_path_owner(None, None, "/var/www/example")?; // No-op
-/// ````
+/// // Change only the group to developers
+/// set_path_owner(None, Some("developers"), "/home/project")?;
+///
+/// // Change both owner and group
+/// set_path_owner(Some("nginx"), Some("www-data"), "/etc/nginx/sites")?;
+///
+/// // No operation (but still validates the path exists)
+/// set_path_owner(None, None, "/tmp/test")?;
+/// ```
+///
+/// # System Requirements
+///
+/// - Unix/Linux system (uses POSIX chown)
+/// - Sufficient privileges (typically requires root for changing to different user)
+/// - Target user and group must exist in system
 ///
 /// # Errors
 ///
-/// Returns `FileCreationError::PermissionSetFailed` if the user or group does not exist,
-/// or if the ownership change fails for any reason.
+/// Returns `FileCreationError::PermissionSetFailed` if:
+/// - Specified user doesn't exist in system
+/// - Specified group doesn't exist in system
+/// - Insufficient privileges to change ownership
+/// - Path doesn't exist
+/// - Operation fails for any system reason
+///
+/// # Security Notes
+///
+/// Changing file ownership can affect access control. Ensure:
+/// - Web files are owned by appropriate web server user
+/// - Sensitive files have restricted ownership
+/// - Group ownership aligns with collaboration needs
 pub fn set_path_owner(
     user_name: Option<&str>,
     group_name: Option<&str>,
@@ -405,6 +763,47 @@ pub fn set_path_owner(
     Ok(())
 }
 
+/// Removes a directory and all its contents recursively.
+///
+/// Safely removes a directory tree, similar to `rm -rf` in Unix.
+/// If the directory doesn't exist, the operation succeeds silently
+/// (idempotent behavior).
+///
+/// # Arguments
+///
+/// * `dir_path` - Path to the directory to remove
+///
+/// # Returns
+///
+/// * `Ok(())` if directory was removed or didn't exist
+/// * `Err(FileCreationError)` if removal failed
+///
+/// # Warning
+///
+/// This operation is **destructive** and **non-recoverable**.
+/// All files and subdirectories will be permanently deleted.
+///
+/// # Examples
+///
+/// ```
+/// // Remove a site directory
+/// remove_directory("/var/www/old-site")?;
+///
+/// // Safe to call even if directory doesn't exist
+/// remove_directory("/tmp/may-not-exist")?;  // Returns Ok(())
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Insufficient permissions to remove directory
+/// - Directory is in use by another process
+/// - I/O error occurs during removal
+///
+/// # Implementation Note
+///
+/// Uses `fs::remove_dir_all` which recursively removes all contents
+/// before removing the directory itself.
 pub fn remove_directory(dir_path: &str) -> Result<(), FileCreationError> {
     let path = Path::new(&dir_path);
     if path.exists() {
@@ -418,6 +817,42 @@ pub fn remove_directory(dir_path: &str) -> Result<(), FileCreationError> {
     Ok(())
 }
 
+/// Removes a single file.
+///
+/// Safely removes a file from the filesystem. If the file doesn't exist,
+/// the operation succeeds silently (idempotent behavior).
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the file to remove
+///
+/// # Returns
+///
+/// * `Ok(())` if file was removed or didn't exist
+/// * `Err(FileCreationError)` if removal failed
+///
+/// # Examples
+///
+/// ```
+/// // Remove a configuration file
+/// remove_file("/etc/nginx/sites-enabled/old-site.conf")?;
+///
+/// // Safe to call even if file doesn't exist
+/// remove_file("/tmp/may-not-exist.txt")?;  // Returns Ok(())
+/// ```
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Insufficient permissions to remove file
+/// - File is locked by another process
+/// - Path points to a directory (use `remove_directory` instead)
+/// - I/O error occurs during removal
+///
+/// # Note
+///
+/// This function only removes files, not directories. Use
+/// `remove_directory` for removing directories.
 pub fn remove_file(file_path: &str) -> Result<(), FileCreationError> {
     let path = Path::new(&file_path);
     if path.exists() {
