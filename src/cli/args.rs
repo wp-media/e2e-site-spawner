@@ -1,15 +1,11 @@
 // This file defines the command-line arguments and options using the clap library.
 // It specifies the structure of commands and their respective arguments.
 
-use clap::{Command, Arg, ArgMatches, ColorChoice};
 use clap::builder::styling::{AnsiColor, Effects, Styles};
+use clap::{Arg, ArgMatches, ColorChoice, Command};
 
 // Create a compile-time constant
-const VERSION: &str = concat!(
-    env!("CARGO_PKG_VERSION"),
-    "\n",
-    env!("CARGO_PKG_AUTHORS")
-);
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\n", env!("CARGO_PKG_AUTHORS"));
 // TODO: Add aliases to commands where appropriate
 /// Builds the CLI application with all commands and arguments
 pub fn build_cli() -> Command {
@@ -98,39 +94,39 @@ pub fn build_cli() -> Command {
                         .index(1),
                 ),
         )
-        // .subcommand(
-        //     Command::new("update")
-        //         .about("Modifies an existing site's configuration")
-        //         .long_about("Updates an existing site by adding WordPress and/or SSL support")
-        //         .after_help("EXAMPLES:\n    \
-        //             e2sp update example.e2e.rocketlabsqa.ovh --wp       # Add WordPress to a static site\n    \
-        //             e2sp update example.e2e.rocketlabsqa.ovh --ssl      # Add SSL certificate to HTTP-only site\n    \
-        //             e2sp update example.e2e.rocketlabsqa.ovh --wp --ssl # Add both WordPress and SSL")
-        //         .arg(
-        //             Arg::new("site_name")
-        //                 .help("The name of the site to update (e.g., example.e2e.rocketlabsqa.ovh)")
-        //                 .required(true)
-        //                 .value_name("SITE_NAME")
-        //                 .index(1),
-        //         )
-        //         .arg(
-        //             Arg::new("wp")
-        //                 .long("wp")
-        //                 .help("Install WordPress on an existing non-WP site")
-        //                 .action(clap::ArgAction::SetTrue),
-        //         )
-        //         .arg(
-        //             Arg::new("ssl")
-        //                 .long("ssl")
-        //                 .help("Add SSL certificate to an HTTP-only site")
-        //                 .action(clap::ArgAction::SetTrue),
-        //         ),
-        // )
-        // .subcommand(
-        //     Command::new("help")
-        //         .about("Displays help information")
-        //         .long_about("Shows detailed help information for all commands or a specific command"),
-        // )
+    // .subcommand(
+    //     Command::new("update")
+    //         .about("Modifies an existing site's configuration")
+    //         .long_about("Updates an existing site by adding WordPress and/or SSL support")
+    //         .after_help("EXAMPLES:\n    \
+    //             e2sp update example.e2e.rocketlabsqa.ovh --wp       # Add WordPress to a static site\n    \
+    //             e2sp update example.e2e.rocketlabsqa.ovh --ssl      # Add SSL certificate to HTTP-only site\n    \
+    //             e2sp update example.e2e.rocketlabsqa.ovh --wp --ssl # Add both WordPress and SSL")
+    //         .arg(
+    //             Arg::new("site_name")
+    //                 .help("The name of the site to update (e.g., example.e2e.rocketlabsqa.ovh)")
+    //                 .required(true)
+    //                 .value_name("SITE_NAME")
+    //                 .index(1),
+    //         )
+    //         .arg(
+    //             Arg::new("wp")
+    //                 .long("wp")
+    //                 .help("Install WordPress on an existing non-WP site")
+    //                 .action(clap::ArgAction::SetTrue),
+    //         )
+    //         .arg(
+    //             Arg::new("ssl")
+    //                 .long("ssl")
+    //                 .help("Add SSL certificate to an HTTP-only site")
+    //                 .action(clap::ArgAction::SetTrue),
+    //         ),
+    // )
+    // .subcommand(
+    //     Command::new("help")
+    //         .about("Displays help information")
+    //         .long_about("Shows detailed help information for all commands or a specific command"),
+    // )
 }
 
 /// Helper function to get subcommand matches

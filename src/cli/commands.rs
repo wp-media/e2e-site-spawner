@@ -1,23 +1,21 @@
+use crate::constants::{DB_CHARSET, DB_PASSWORD, DB_USER};
 /// Command module for the e2e-site-spawner CLI tool.
 ///
 /// This module contains the implementation of various commands
 /// for managing sites on an Nginx server. Each command function
 /// serves as a placeholder for future implementation and prints
 /// a description of its intended effect.
-
-
 use crate::constants::{DB_HOST, HTML_DEFAULT_INDEX_FILE, NGINX_CONF_D_PATH, SITES_PATH};
-use crate::constants::{DB_USER, DB_PASSWORD, DB_CHARSET};
-use crate::nginx::{self, reload_nginx};
 use crate::nginx::config::validate_nginx_configuration;
+use crate::nginx::{self, reload_nginx};
+use crate::nginx::{append_to_nginx_file, create_nginx_file};
 use crate::utils::db;
-use crate::utils::ssl;
 use crate::utils::sites::{self, create_file_with_content_if_not_exists, revert_site_spawn};
-use crate::nginx::{create_nginx_file, append_to_nginx_file};
+use crate::utils::ssl;
 use crate::utils::validators::validate_site_name;
-use std::{fs, process};
 use std::env;
 use std::path::Path;
+use std::{fs, process};
 
 pub enum SpawnSteps {
     CreateNginxConfig,
@@ -29,11 +27,18 @@ pub enum SpawnSteps {
     CreateWPConfigFile,
 }
 
-pub const REMOVE_NGINX_CONFIG: [SpawnSteps; 2] = [SpawnSteps::CreateNginxConfig, SpawnSteps::CreateNginxConfigWithSSL];
+pub const REMOVE_NGINX_CONFIG: [SpawnSteps; 2] = [
+    SpawnSteps::CreateNginxConfig,
+    SpawnSteps::CreateNginxConfigWithSSL,
+];
 
-pub const REMOVE_SITE_DIRECTORY: [SpawnSteps; 2] = [SpawnSteps::CreateSiteDirectory, SpawnSteps::CreateWPConfigFile];
+pub const REMOVE_SITE_DIRECTORY: [SpawnSteps; 2] = [
+    SpawnSteps::CreateSiteDirectory,
+    SpawnSteps::CreateWPConfigFile,
+];
 
-pub const REMOVE_SSL_DIRECTORY: [SpawnSteps; 2] = [SpawnSteps::CreateSSLDirectory, SpawnSteps::CreateSSL];
+pub const REMOVE_SSL_DIRECTORY: [SpawnSteps; 2] =
+    [SpawnSteps::CreateSSLDirectory, SpawnSteps::CreateSSL];
 
 /// Spawns a new site with the given name.
 ///
@@ -79,14 +84,19 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
             steps_completed.push(SpawnSteps::CreateNginxConfig);
         }
         Err(e) => {
-            eprintln!("✗ Failed to create Nginx configuration file for HTTP: {}", e);
+            eprintln!(
+                "✗ Failed to create Nginx configuration file for HTTP: {}",
+                e
+            );
             process::exit(1);
         }
     }
     match sites::create_directory_if_not_exists(nginx_config.root.as_str(), Some(0o777)) {
         Ok(()) => {
             // Change ownership of Sites directory www-data:root
-            if sites::set_path_owner(Some("www-data"), Some("root"), nginx_config.root.as_str()).is_err() {
+            if sites::set_path_owner(Some("www-data"), Some("root"), nginx_config.root.as_str())
+                .is_err()
+            {
                 eprintln!("✗ Failed to set Sites directory ownership.");
                 sites::remove_directory(nginx_config.root.as_str()).unwrap_or(());
                 revert_site_spawn(site_name, &steps_completed, &nginx_config);
@@ -100,15 +110,15 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         }
     }
     let _ = validate_nginx_configuration().unwrap_or_else(|e| {
-        eprintln!("✗ Nginx configuration validation failed after creating HTTP config. \n{}", e);
+        eprintln!(
+            "✗ Nginx configuration validation failed after creating HTTP config. \n{}",
+            e
+        );
         revert_site_spawn(site_name, &steps_completed, &nginx_config);
     });
     if let Some(ssl_root) = &nginx_config.ssl_root {
         println!("SSL will be enabled for this site.");
-        match sites::create_directory_if_not_exists(
-            ssl_root,
-            Some(0o750),
-        ) {
+        match sites::create_directory_if_not_exists(ssl_root, Some(0o750)) {
             Ok(()) => {
                 // Change ownership of SSL directory to current user:root
                 let current_user = env::var("USER").unwrap_or_else(|_| "www-data".to_string());
@@ -137,7 +147,10 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
                     steps_completed.push(SpawnSteps::CreateNginxConfigWithSSL);
                 }
                 Err(e) => {
-                    eprintln!("✗ Failed to update Nginx configuration file for HTTPS: {}", e);
+                    eprintln!(
+                        "✗ Failed to update Nginx configuration file for HTTPS: {}",
+                        e
+                    );
                     revert_site_spawn(site_name, &steps_completed, &nginx_config);
                 }
             }
@@ -148,7 +161,10 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         }
     }
     let _ = validate_nginx_configuration().unwrap_or_else(|e| {
-        eprintln!("✗ Nginx configuration validation failed after creating HTTPS config. \n{}", e);
+        eprintln!(
+            "✗ Nginx configuration validation failed after creating HTTPS config. \n{}",
+            e
+        );
         revert_site_spawn(site_name, &steps_completed, &nginx_config);
     });
     if !no_wp {
@@ -175,7 +191,14 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
                 revert_site_spawn(site_name, &steps_completed, &nginx_config);
             }
         }
-        match sites::create_wp_config_file(&nginx_config.root, &db_name, DB_USER, DB_PASSWORD, DB_HOST, DB_CHARSET) {
+        match sites::create_wp_config_file(
+            &nginx_config.root,
+            &db_name,
+            DB_USER,
+            DB_PASSWORD,
+            DB_HOST,
+            DB_CHARSET,
+        ) {
             Ok(()) => {
                 println!("✓ WordPress configuration file created successfully");
                 steps_completed.push(SpawnSteps::CreateWPConfigFile);
@@ -223,15 +246,13 @@ pub fn delete_site(site_name: &str) {
         eprintln!("✗ Failed to remove site directory: {}", e);
     });
     println!("Attempting to remove Nginx configuration...");
-    sites::remove_file(nginx_config.nginx_config_file_path.as_str())
-        .unwrap_or_else(|e| {
-            eprintln!("✗ Failed to remove Nginx configuration file: {}", e);
+    sites::remove_file(nginx_config.nginx_config_file_path.as_str()).unwrap_or_else(|e| {
+        eprintln!("✗ Failed to remove Nginx configuration file: {}", e);
     });
     println!("Attempting to remove SSL files...");
     // Safe to call unwrap here as ssl_root is Some when ssl is true
-    sites::remove_directory(nginx_config.ssl_root.as_ref().unwrap())
-        .unwrap_or_else(|e| {
-            eprintln!("✗ Failed to remove SSL directory: {}", e);
+    sites::remove_directory(nginx_config.ssl_root.as_ref().unwrap()).unwrap_or_else(|e| {
+        eprintln!("✗ Failed to remove SSL directory: {}", e);
     });
     let db_name = db::create_db_name(site_name);
     println!("Attempting to drop database '{}'...", db_name);
@@ -278,7 +299,7 @@ pub fn deactivate_site(site_name: &str) {
 
     let active_path = Path::new(&nginx_config.nginx_config_file_path);
     let deactivated_path = active_path.with_extension("conf.deactivated");
-    
+
     if !active_path.exists() {
         println!("Nothing to deactivate for site '{}'.", site_name);
         process::exit(0);
@@ -323,7 +344,7 @@ pub fn activate_site(site_name: &str) {
         eprintln!("✗ Validation failed: {}", e);
         process::exit(1);
     });
-    
+
     let active_path = Path::new(&nginx_config.nginx_config_file_path);
     let deactivated_path = active_path.with_extension("conf.deactivated");
 
@@ -341,7 +362,7 @@ pub fn activate_site(site_name: &str) {
             process::exit(1);
         }
     }
-    
+
     reload_nginx().unwrap_or_else(|e| {
         eprintln!("✗ Failed to reload Nginx: {}", e);
         process::exit(1);

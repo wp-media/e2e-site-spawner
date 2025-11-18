@@ -2,12 +2,12 @@
 // It sets up the command-line interface and handles the execution of commands based on user input.
 
 mod cli;
+pub mod constants;
 pub mod nginx;
 pub mod utils;
-pub mod constants;
-use cli::commands::{spawn_site, delete_site, deactivate_site, activate_site};
-use std::process;
+use cli::commands::{activate_site, deactivate_site, delete_site, spawn_site};
 use colored::*;
+use std::process;
 
 fn main() {
     let matches = cli::args::get_matches();
@@ -16,13 +16,19 @@ fn main() {
     if let Some(matches) = matches.subcommand_matches("spawn") {
         // Check for root/sudo privileges before executing
         require_elevated_privileges();
-        
+
         let site_name = matches.get_one::<String>("site_name").unwrap();
         let ssl = matches.get_flag("ssl");
         if ssl && !check_if_acme_sh_installed() {
-            println!("{} 'acme.sh' is not installed. SSL generation requires 'acme.sh' to be installed.", "❌".bright_yellow());
+            println!(
+                "{} 'acme.sh' is not installed. SSL generation requires 'acme.sh' to be installed.",
+                "❌".bright_yellow()
+            );
             println!("");
-            println!("{}  You can install it manually from https://github.com/acmesh-official/acme.sh", "ℹ️".bright_blue());
+            println!(
+                "{}  You can install it manually from https://github.com/acmesh-official/acme.sh",
+                "ℹ️".bright_blue()
+            );
             process::exit(1);
         }
         let no_wp = matches.get_flag("no-wp");
@@ -33,8 +39,7 @@ fn main() {
 
         let site_name = matches.get_one::<String>("site_name").unwrap();
         delete_site(site_name);
-    }
-    else if let Some(matches) = matches.subcommand_matches("deactivate") {
+    } else if let Some(matches) = matches.subcommand_matches("deactivate") {
         require_elevated_privileges();
 
         let site_name = matches.get_one::<String>("site_name").unwrap();
@@ -44,12 +49,12 @@ fn main() {
 
         let site_name = matches.get_one::<String>("site_name").unwrap();
         activate_site(site_name);
-    // } else if let Some(matches) = matches.subcommand_matches("update") {
-    //     let site_name = matches.get_one::<String>("site_name").unwrap();
-    //     let wp = matches.get_flag("wp");
-    //     let ssl = matches.get_flag("ssl");
-    //     update_site(site_name, wp, ssl);
-    // } 
+        // } else if let Some(matches) = matches.subcommand_matches("update") {
+        //     let site_name = matches.get_one::<String>("site_name").unwrap();
+        //     let wp = matches.get_flag("wp");
+        //     let ssl = matches.get_flag("ssl");
+        //     update_site(site_name, wp, ssl);
+        // }
     }
 }
 
@@ -72,7 +77,7 @@ fn is_running_as_root() -> bool {
     {
         unsafe { libc::geteuid() == 0 }
     }
-    
+
     #[cfg(not(unix))]
     {
         // For non-Unix systems, you might want to implement a different check
@@ -85,36 +90,80 @@ fn is_running_as_root() -> bool {
 /// Prints a beautiful, informative error message about missing privileges.
 fn print_privilege_error() {
     use colored::*;
-    
+
     println!();
-    println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_red());
-    println!("{}", "                    ⚠️  ELEVATED PRIVILEGES REQUIRED  ⚠️".bright_red().bold());
-    println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_red());
+    println!(
+        "{}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_red()
+    );
+    println!(
+        "{}",
+        "                    ⚠️  ELEVATED PRIVILEGES REQUIRED  ⚠️"
+            .bright_red()
+            .bold()
+    );
+    println!(
+        "{}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_red()
+    );
     println!();
-    println!("{}", "This command requires administrative privileges to:".bright_yellow());
+    println!(
+        "{}",
+        "This command requires administrative privileges to:".bright_yellow()
+    );
     println!();
-    println!("  {}  Create/modify files in system directories (/etc/nginx, /var/www)", "•".bright_cyan());
-    println!("  {}  Manage Nginx configuration and reload the service", "•".bright_cyan());
-    println!("  {}  Create MySQL/MariaDB databases and manage permissions", "•".bright_cyan());
-    println!("  {}  Set proper file ownership and permissions", "•".bright_cyan());
+    println!(
+        "  {}  Create/modify files in system directories (/etc/nginx, /var/www)",
+        "•".bright_cyan()
+    );
+    println!(
+        "  {}  Manage Nginx configuration and reload the service",
+        "•".bright_cyan()
+    );
+    println!(
+        "  {}  Create MySQL/MariaDB databases and manage permissions",
+        "•".bright_cyan()
+    );
+    println!(
+        "  {}  Set proper file ownership and permissions",
+        "•".bright_cyan()
+    );
     println!();
-    println!("{}", "─────────────────────────────────────────────────────────────".bright_black());
+    println!(
+        "{}",
+        "─────────────────────────────────────────────────────────────".bright_black()
+    );
     println!();
-    println!("{} {}", "Please run this command with sudo:".bright_white().bold(), "");
+    println!(
+        "{} {}",
+        "Please run this command with sudo:".bright_white().bold(),
+        ""
+    );
     println!();
-    
+
     // Get the current command line arguments to show the exact command
     let args: Vec<String> = std::env::args().collect();
     let command = args.join(" ");
-    
-    println!("  {} {}", "$ sudo".bright_green().bold(), command.bright_white());
+
+    println!(
+        "  {} {}",
+        "$ sudo".bright_green().bold(),
+        command.bright_white()
+    );
     println!();
-    
-    println!("{} {}", "Or, if you're using the root user:".italic().bright_black(), "");
+
+    println!(
+        "{} {}",
+        "Or, if you're using the root user:".italic().bright_black(),
+        ""
+    );
     println!();
     println!("  {} {}", "$".bright_green().bold(), command.bright_white());
     println!();
-    println!("{}", "─────────────────────────────────────────────────────────────".bright_black());
+    println!(
+        "{}",
+        "─────────────────────────────────────────────────────────────".bright_black()
+    );
     println!();
     println!("{}", "📚 Learn more:".bright_blue().bold());
     println!("   • https://linux.die.net/man/8/sudo");
@@ -136,11 +185,7 @@ fn try_acme_sh_installation() -> Result<(), String> {
     println!("{} Attempting to install acme.sh...", "🔄".bright_blue());
 
     let install_output = Command::new("curl")
-        .args(&[
-            "https://get.acme.sh",
-            "|",
-            "sh",
-        ])
+        .args(&["https://get.acme.sh", "|", "sh"])
         .output()
         .map_err(|e| format!("Failed to execute curl command: {}", e))?;
 

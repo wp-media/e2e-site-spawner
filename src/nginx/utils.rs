@@ -1,11 +1,10 @@
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
-use crate::utils::sites::FileCreationError;
 use crate::utils::sites;
-
+use crate::utils::sites::FileCreationError;
 
 /// Gets a validated file path for nginx configuration files.
 ///
@@ -41,21 +40,25 @@ use crate::utils::sites;
 fn get_validated_nginx_path(path: &str) -> Result<PathBuf, FileCreationError> {
     // 1. Validate path isn't empty
     if path.is_empty() {
-        return Err(FileCreationError::InvalidPath("Path cannot be empty".to_string()));
+        return Err(FileCreationError::InvalidPath(
+            "Path cannot be empty".to_string(),
+        ));
     }
 
     // 2. Security: Check for path traversal attempts
     if path.contains("../") || path.contains("..\\") {
-        return Err(FileCreationError::PathTraversal(
-            format!("Path contains traversal pattern: {}", path)
-        ));
+        return Err(FileCreationError::PathTraversal(format!(
+            "Path contains traversal pattern: {}",
+            path
+        )));
     }
 
     // 3. Validate file extension (should be .conf for nginx)
     if !path.ends_with(".conf") {
-        return Err(FileCreationError::InvalidPath(
-            format!("File must have .conf extension, got: {}", path)
-        ));
+        return Err(FileCreationError::InvalidPath(format!(
+            "File must have .conf extension, got: {}",
+            path
+        )));
     }
 
     // 4. Convert to PathBuf for further checks
@@ -76,7 +79,7 @@ fn get_validated_nginx_path(path: &str) -> Result<PathBuf, FileCreationError> {
                 }
             } else {
                 return Err(FileCreationError::InvalidPath(
-                    "Cannot determine parent directory".to_string()
+                    "Cannot determine parent directory".to_string(),
                 ));
             }
         }
@@ -89,12 +92,16 @@ fn get_validated_nginx_path(path: &str) -> Result<PathBuf, FileCreationError> {
         "/var/www/",
         "/tmp/", // For testing
     ];
-    
+
     let path_str = absolute_path.to_string_lossy();
-    if !valid_prefixes.iter().any(|prefix| path_str.starts_with(prefix)) {
-        return Err(FileCreationError::InvalidPath(
-            format!("Path must be within nginx directories. Got: {}", path_str)
-        ));
+    if !valid_prefixes
+        .iter()
+        .any(|prefix| path_str.starts_with(prefix))
+    {
+        return Err(FileCreationError::InvalidPath(format!(
+            "Path must be within nginx directories. Got: {}",
+            path_str
+        )));
     }
 
     Ok(file_path.to_path_buf())
@@ -120,7 +127,7 @@ fn get_validated_nginx_path(path: &str) -> Result<PathBuf, FileCreationError> {
 ///
 /// ```
 /// use utils::sites::create_nginx_file;
-/// 
+///
 /// let config_content = "server { listen 80; server_name example.com; }";
 /// match create_nginx_file("/etc/nginx/sites-available/example.com.conf", config_content) {
 ///     Ok(()) => println!("Configuration file created successfully"),
@@ -138,10 +145,10 @@ fn get_validated_nginx_path(path: &str) -> Result<PathBuf, FileCreationError> {
 /// - File write operations fail
 /// - Permission setting fails (Unix only)
 pub fn create_nginx_file(path: &str, content: &str) -> Result<(), FileCreationError> {
-        // Validate content isn't empty
+    // Validate content isn't empty
     if content.trim().is_empty() {
         return Err(FileCreationError::InvalidPath(
-            "Configuration content cannot be empty".to_string()
+            "Configuration content cannot be empty".to_string(),
         ));
     }
 
@@ -156,23 +163,26 @@ pub fn create_nginx_file(path: &str, content: &str) -> Result<(), FileCreationEr
     if let Some(parent) = file_path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent).map_err(|e| {
-                FileCreationError::DirectoryCreationFailed(
-                    format!("Cannot create parent directory '{}': {}", parent.display(), e)
-                )
+                FileCreationError::DirectoryCreationFailed(format!(
+                    "Cannot create parent directory '{}': {}",
+                    parent.display(),
+                    e
+                ))
             })?;
         }
     }
 
     // Check if file already exists - FAIL if it does
     if file_path.exists() {
-        return Err(FileCreationError::FileWriteFailed(
-            format!("Configuration file already exists: {}. Cannot overwrite existing site configuration", path)
-        ));
+        return Err(FileCreationError::FileWriteFailed(format!(
+            "Configuration file already exists: {}. Cannot overwrite existing site configuration",
+            path
+        )));
     }
 
     // Write the file - use create_new to ensure atomic creation
     use std::fs::OpenOptions;
-    
+
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)  // Fails if file exists (atomic check-and-create)
@@ -188,11 +198,9 @@ pub fn create_nginx_file(path: &str, content: &str) -> Result<(), FileCreationEr
                 )
             }
         })?;
-    
+
     file.write_all(content.as_bytes()).map_err(|e| {
-        FileCreationError::FileWriteFailed(
-            format!("Cannot write to '{}': {}", path, e)
-        )
+        FileCreationError::FileWriteFailed(format!("Cannot write to '{}': {}", path, e))
     })?;
 
     // Set appropriate permissions (644 - readable by all, writable by owner)
@@ -201,9 +209,10 @@ pub fn create_nginx_file(path: &str, content: &str) -> Result<(), FileCreationEr
         let permissions = fs::Permissions::from_mode(0o644);
         fs::set_permissions(&file_path, permissions).map_err(|e| {
             sites::remove_file(&path).unwrap_or(());
-            FileCreationError::PermissionSetFailed(
-                format!("Cannot set permissions on '{}': {}", path, e)
-            )
+            FileCreationError::PermissionSetFailed(format!(
+                "Cannot set permissions on '{}': {}",
+                path, e
+            ))
         })?;
     }
 
@@ -230,7 +239,7 @@ pub fn create_nginx_file(path: &str, content: &str) -> Result<(), FileCreationEr
 ///
 /// ```
 /// use utils::sites::append_to_nginx_file;
-/// 
+///
 /// // Add a new location block to an existing configuration
 /// let additional_config = "location /api { proxy_pass http://backend; }";
 /// match append_to_nginx_file("/etc/nginx/sites-available/example.com.conf", additional_config) {
@@ -271,7 +280,7 @@ pub fn append_to_nginx_file(path: &str, content: &str) -> Result<(), FileCreatio
     // Validate content isn't empty
     if content.trim().is_empty() {
         return Err(FileCreationError::InvalidPath(
-            "Configuration content cannot be empty".to_string()
+            "Configuration content cannot be empty".to_string(),
         ));
     }
 
@@ -289,19 +298,15 @@ pub fn append_to_nginx_file(path: &str, content: &str) -> Result<(), FileCreatio
         .append(true)
         .open(&file_path)
         .map_err(|e| {
-            FileCreationError::FileWriteFailed(
-                format!("Cannot open file '{}': {}", path, e)
-            )
+            FileCreationError::FileWriteFailed(format!("Cannot open file '{}': {}", path, e))
         })?;
-    
+
     // Prepend newline to ensure proper separation from existing content
     let content = format!("\n{}", content);
-    
+
     // Write the content to the file
     file.write_all(content.as_bytes()).map_err(|e| {
-        FileCreationError::FileWriteFailed(
-            format!("Cannot write to '{}': {}", path, e)
-        )
+        FileCreationError::FileWriteFailed(format!("Cannot write to '{}': {}", path, e))
     })?;
 
     Ok(())
@@ -327,7 +332,6 @@ pub fn reload_nginx() -> Result<(), String> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
 
     #[test]
     fn test_get_validated_nginx_path_valid() {
@@ -359,13 +363,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.conf");
         let content = "server { listen 80; }";
-        
+
         let result = create_nginx_file(file_path.to_str().unwrap(), content);
         assert!(result.is_ok());
-        
+
         // Verify file was created
         assert!(file_path.exists());
-        
+
         // Verify content
         let written_content = fs::read_to_string(&file_path).unwrap();
         assert_eq!(written_content, content);
@@ -381,7 +385,7 @@ mod tests {
     fn test_reject_non_conf_extension() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.txt");
-        
+
         let result = create_nginx_file(file_path.to_str().unwrap(), "content");
         assert!(matches!(result, Err(FileCreationError::InvalidPath(_))));
     }
@@ -396,7 +400,7 @@ mod tests {
     fn test_reject_empty_content() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.conf");
-        
+
         let result = create_nginx_file(file_path.to_str().unwrap(), "   ");
         assert!(matches!(result, Err(FileCreationError::InvalidPath(_))));
     }
@@ -406,15 +410,18 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.conf");
         let content = "server { listen 80; }";
-        
+
         // Create file first time - should succeed
         let result = create_nginx_file(file_path.to_str().unwrap(), content);
         assert!(result.is_ok());
-        
+
         // Try to create same file again - should fail
         let result2 = create_nginx_file(file_path.to_str().unwrap(), content);
         assert!(result2.is_err());
-        assert!(matches!(result2, Err(FileCreationError::FileWriteFailed(_))));
+        assert!(matches!(
+            result2,
+            Err(FileCreationError::FileWriteFailed(_))
+        ));
     }
 
     #[test]
@@ -423,26 +430,29 @@ mod tests {
         let file_path = temp_dir.path().join("test.conf");
         let initial_content = "server { listen 80; }";
         let append_content = "location / { return 200; }";
-        
+
         // Create initial file
         create_nginx_file(file_path.to_str().unwrap(), initial_content).unwrap();
-        
+
         // Append content
         let result = append_to_nginx_file(file_path.to_str().unwrap(), append_content);
         assert!(result.is_ok());
-        
+
         // Verify appended content
         let full_content = fs::read_to_string(&file_path).unwrap();
         assert!(full_content.contains(initial_content));
         assert!(full_content.contains(append_content));
-        assert_eq!(full_content, format!("{}\n{}", initial_content, append_content));
+        assert_eq!(
+            full_content,
+            format!("{}\n{}", initial_content, append_content)
+        );
     }
 
     #[test]
     fn test_append_to_non_existent_file() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("nonexistent.conf");
-        
+
         let result = append_to_nginx_file(file_path.to_str().unwrap(), "content");
         assert!(result.is_err());
         assert!(matches!(result, Err(FileCreationError::FileWriteFailed(_))));
@@ -452,10 +462,10 @@ mod tests {
     fn test_append_empty_content() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.conf");
-        
+
         // Create initial file
         create_nginx_file(file_path.to_str().unwrap(), "server { }").unwrap();
-        
+
         // Try to append empty content
         let result = append_to_nginx_file(file_path.to_str().unwrap(), "  ");
         assert!(result.is_err());

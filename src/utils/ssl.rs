@@ -1,6 +1,6 @@
+use colored::*;
 use std::io::{self, Write};
 use std::process::Command;
-use colored::*;
 
 use crate::nginx;
 
@@ -35,7 +35,7 @@ use crate::nginx;
 ///     "/etc/nginx/conf.d".to_string(),
 ///     Some("/etc/nginx/ssl".to_string())
 /// );
-/// 
+///
 /// match generate_ssl(&config) {
 ///     Ok(()) => println!("SSL certificates installed successfully"),
 ///     Err(e) => eprintln!("SSL generation failed: {}", e),
@@ -43,18 +43,26 @@ use crate::nginx;
 /// ```
 pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), String> {
     // Validate SSL root is configured
-    let ssl_root = nginx_config.ssl_root.as_ref()
-        .ok_or_else(|| "SSL root path is not configured. Cannot generate SSL certificates.".to_string())?;
-    
+    let ssl_root = nginx_config.ssl_root.as_ref().ok_or_else(|| {
+        "SSL root path is not configured. Cannot generate SSL certificates.".to_string()
+    })?;
+
     let site_name = &nginx_config.site_name;
     let webroot = &nginx_config.root;
 
-    println!("\n{} Generating SSL certificate for '{}'", "🔐".bright_blue(), site_name.bright_white());
+    println!(
+        "\n{} Generating SSL certificate for '{}'",
+        "🔐".bright_blue(),
+        site_name.bright_white()
+    );
     println!("{}", "─".repeat(60).bright_black());
-    
+
     // Step 1: Issue the SSL certificate
-    println!("  {} Requesting certificate from Let's Encrypt...", "1.".bright_cyan());
-    
+    println!(
+        "  {} Requesting certificate from Let's Encrypt...",
+        "1.".bright_cyan()
+    );
+
     let issue_output = Command::new("acme.sh")
         .args(&[
             "--issue",
@@ -70,11 +78,11 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
                 e
             )
         })?;
-    
+
     if !issue_output.status.success() {
         let stderr = String::from_utf8_lossy(&issue_output.stderr);
         let stdout = String::from_utf8_lossy(&issue_output.stdout);
-        
+
         // Check for common errors
         if stderr.contains("Verify error") || stdout.contains("Verify error") {
             return Err(format!(
@@ -88,7 +96,10 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
                 site_name, webroot, stderr
             ));
         } else if stderr.contains("already exists") || stdout.contains("already exists") {
-            println!("  {} Certificate already exists, skipping issuance", "ℹ️".bright_yellow());
+            println!(
+                "  {} Certificate already exists, skipping issuance",
+                "ℹ️".bright_yellow()
+            );
         } else {
             return Err(format!(
                 "Failed to issue SSL certificate:\n{}{}",
@@ -98,31 +109,37 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
     } else {
         println!("  {} Certificate issued successfully", "✓".bright_green());
     }
-    
+
     // Step 2: Install the certificate
-    println!("  {} Installing certificate to nginx directories...", "2.".bright_cyan());
-    
+    println!(
+        "  {} Installing certificate to nginx directories...",
+        "2.".bright_cyan()
+    );
+
     let privkey_path = format!("{}/privkey.pem", ssl_root);
     let fullchain_path = format!("{}/fullchain.pem", ssl_root);
-    
+
     let install_output = Command::new("acme.sh")
         .args(&[
             "--install-cert",
-            "-d", site_name,
-            "--key-file", &privkey_path,
-            "--fullchain-file", &fullchain_path,
-            "--reloadcmd", "sudo systemctl reload nginx",
-            "--server", "letsencrypt"
+            "-d",
+            site_name,
+            "--key-file",
+            &privkey_path,
+            "--fullchain-file",
+            &fullchain_path,
+            "--reloadcmd",
+            "sudo systemctl reload nginx",
+            "--server",
+            "letsencrypt",
         ])
         .output()
-        .map_err(|e| {
-            format!("Failed to execute acme.sh install command: {}", e)
-        })?;
-    
+        .map_err(|e| format!("Failed to execute acme.sh install command: {}", e))?;
+
     if !install_output.status.success() {
         let stderr = String::from_utf8_lossy(&install_output.stderr);
         let stdout = String::from_utf8_lossy(&install_output.stdout);
-        
+
         return Err(format!(
             "Failed to install SSL certificate:\n\
             • Check if the SSL directory {} exists\n\
@@ -132,19 +149,25 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
             ssl_root, ssl_root, stdout, stderr
         ));
     }
-    
+
     // println!("  {} Certificate installed successfully", "✓".bright_green());
     // println!("  {} Nginx reloaded with new certificate", "✓".bright_green());
-    
+
     println!("{}", "─".repeat(60).bright_black());
-    println!("{} SSL certificate generated and installed successfully!", "🎉".bright_green());
+    println!(
+        "{} SSL certificate generated and installed successfully!",
+        "🎉".bright_green()
+    );
     println!();
     println!("{} Certificate details:", "📋".bright_blue());
     println!("  • Domain: {}", site_name.bright_white());
     println!("  • Private key: {}", privkey_path.bright_white());
     println!("  • Certificate: {}", fullchain_path.bright_white());
-    println!("  • Auto-renewal: {}", "Enabled via acme.sh cron".bright_green());
-    
+    println!(
+        "  • Auto-renewal: {}",
+        "Enabled via acme.sh cron".bright_green()
+    );
+
     Ok(())
 }
 
@@ -153,7 +176,10 @@ pub fn print_ssl_warning(site_name: &str) {
     println!("⚠️  SSL CONFIGURATION WARNING ⚠️");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("For SSL installation to succeed:");
-    println!("• The domain '{}' MUST already be pointing to this server", site_name);
+    println!(
+        "• The domain '{}' MUST already be pointing to this server",
+        site_name
+    );
     println!("• DNS propagation must be complete");
     println!("\nIf SSL generation fails:");
     println!("• The site will still be created with HTTP-only access");
@@ -166,7 +192,10 @@ pub fn ask_for_ssl_confirmation(site_name: &str) -> bool {
     println!("⚠️  SSL CONFIGURATION WARNING ⚠️");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("For SSL installation to succeed:");
-    println!("• The domain '{}' MUST already be pointing to this server", site_name);
+    println!(
+        "• The domain '{}' MUST already be pointing to this server",
+        site_name
+    );
     println!("• DNS propagation must be complete");
     println!("\nIf SSL generation fails:");
     println!("• The site will still be created with HTTP-only access");

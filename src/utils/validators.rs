@@ -57,7 +57,7 @@ pub fn validate_site_name(site_name: &str) -> bool {
 
     // Split into labels and validate each
     let labels: Vec<&str> = site_name.split('.').collect();
-    
+
     // Must have at least 2 labels (domain + TLD)
     if labels.len() < 2 {
         return false;
@@ -140,34 +140,34 @@ mod tests {
         // No TLD
         assert!(!validate_site_name("example"));
         assert!(!validate_site_name("localhost"));
-        
+
         // Empty or whitespace
         assert!(!validate_site_name(""));
         assert!(!validate_site_name(" "));
         assert!(!validate_site_name("example .com"));
-        
+
         // Invalid characters
         assert!(!validate_site_name("exam_ple.com"));
         assert!(!validate_site_name("exam ple.com"));
         assert!(!validate_site_name("example!.com"));
         assert!(!validate_site_name("exämple.com"));
-        
+
         // Invalid hyphens
         assert!(!validate_site_name("-example.com"));
         assert!(!validate_site_name("example-.com"));
         assert!(!validate_site_name("example.-com"));
         assert!(!validate_site_name("example.com-"));
-        
+
         // Invalid dots
         assert!(!validate_site_name(".example.com"));
         assert!(!validate_site_name("example.com."));
         assert!(!validate_site_name("example..com"));
         assert!(!validate_site_name("example."));
-        
+
         // Too long label (over 63 chars)
         let long_label = format!("{}.com", "a".repeat(64));
         assert!(!validate_site_name(&long_label));
-        
+
         // Invalid TLD
         assert!(!validate_site_name("example.123"));
         assert!(!validate_site_name("example.c"));
@@ -178,17 +178,17 @@ mod tests {
     fn test_edge_cases() {
         // Minimum valid domain
         assert!(validate_site_name("a.co"));
-        
+
         // Maximum label length (63 chars)
         let max_label = format!("{}.com", "a".repeat(63));
         assert!(validate_site_name(&max_label));
-        
+
         // Multiple subdomains
         assert!(validate_site_name("a.b.c.d.e.f.example.com"));
-        
+
         // Numbers in domain
         assert!(validate_site_name("123.456.example.com"));
-        
+
         // Hyphen in middle
         assert!(validate_site_name("my-awesome-site.example.com"));
     }

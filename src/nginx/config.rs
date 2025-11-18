@@ -37,15 +37,8 @@ impl NginxConfig {
     /// # Returns
     ///
     /// A new instance of NginxConfig.
-    pub fn new(
-        site_name: String,
-        sites_path: String,
-        nginx_config: String,
-        use_ssl: bool,
-    ) -> Self {
-        let ssl_path = use_ssl.then(|| {
-            format!("{}/{}", SITES_SSL_PATH, site_name)
-        });
+    pub fn new(site_name: String, sites_path: String, nginx_config: String, use_ssl: bool) -> Self {
+        let ssl_path = use_ssl.then(|| format!("{}/{}", SITES_SSL_PATH, site_name));
         let nginx_config_file_path = format!("{}/{}.conf", nginx_config, site_name);
         let root = format!("{}/{}", sites_path, site_name);
         NginxConfig {
@@ -148,11 +141,11 @@ impl NginxConfig {
     ///     "/etc/nginx/conf.d".to_string(),
     ///     Some("/etc/nginx/ssl".to_string())
     /// );
-    /// 
+    ///
     /// // Generate HTTP configuration
     /// let http_config = config.generate_config(NginxProtocol::Http);
     /// assert!(http_config.contains("listen 80"));
-    /// 
+    ///
     /// // Generate HTTPS configuration
     /// let https_config = config.generate_config(NginxProtocol::Https);
     /// assert!(https_config.contains("listen 443"));
@@ -167,7 +160,7 @@ impl NginxConfig {
                 NGINX_HTTPS_TEMPLATE.to_string()
             }
         };
-        
+
         // Replace site_name placeholder
         config = config.replace("!{{site_name}}!", &self.site_name);
 
@@ -205,16 +198,14 @@ pub fn validate_nginx_configuration() -> Result<(), String> {
     let output = Command::new("nginx")
         .args(&["-t"])
         .output()
-        .map_err(|e| {
-            format!("Failed to execute nginx: {}.", e)
-        })?;
+        .map_err(|e| format!("Failed to execute nginx: {}.", e))?;
 
     if output.status.success() {
         Ok(())
     } else {
         // Get the error output from nginx
         let stderr = String::from_utf8_lossy(&output.stderr);
-        
+
         // Format a concise error message
         Err(format!(
             "Nginx configuration validation failed:\n{}",
@@ -235,18 +226,18 @@ pub fn validate_nginx_configuration() -> Result<(), String> {
 /// * `Err(String)` - If invalid, with nginx error output
 pub fn validate_nginx_config_file(config_path: &str) -> Result<(), String> {
     use std::fs;
-    
+
     // Create a temporary main config that includes the target file
     let temp_config = format!("/tmp/nginx_test_{}.conf", std::process::id());
     let include_content = format!(
         "events {{ worker_connections 1024; }}\nhttp {{ include {}; }}\n",
         config_path
     );
-    
+
     // Write temporary config
     fs::write(&temp_config, include_content)
         .map_err(|e| format!("Failed to create temp config: {}", e))?;
-    
+
     // Test with the temporary config
     let output = Command::new("nginx")
         .args(&["-t", "-c", &temp_config])
@@ -255,17 +246,17 @@ pub fn validate_nginx_config_file(config_path: &str) -> Result<(), String> {
             let _ = fs::remove_file(&temp_config);
             format!("Failed to execute nginx: {}", e)
         })?;
-    
+
     // Clean up
     let _ = fs::remove_file(&temp_config);
-    
+
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!(
             "Invalid configuration in '{}':\n{}",
-            config_path, 
+            config_path,
             stderr.trim()
         ))
     }
@@ -290,15 +281,15 @@ mod tests {
         // Verify HTTP template is used
         assert!(generated.contains(NGINX_HTTP_CONFIG_MARKER));
         assert!(generated.contains("listen 80"));
-        
+
         // Verify HTTPS content is NOT included
         assert!(!generated.contains(NGINX_HTTPS_CONFIG_MARKER));
         assert!(!generated.contains("listen 443"));
-        
+
         // Verify placeholders are replaced
         assert!(!generated.contains("!{{site_name}}!"));
         assert!(!generated.contains("!{{site_path}}!"));
-        
+
         // Verify actual values are present
         assert!(generated.contains("test.example.com"));
         assert!(generated.contains("/var/www/html/test.example.com"));
@@ -318,16 +309,16 @@ mod tests {
         // Verify HTTPS template is used
         assert!(generated.contains(NGINX_HTTPS_CONFIG_MARKER));
         assert!(generated.contains("listen 443"));
-        
+
         // Verify HTTP content is NOT included
         assert!(!generated.contains(NGINX_HTTP_CONFIG_MARKER));
         assert!(!generated.contains("listen 80"));
-        
+
         // Verify all placeholders are replaced
         assert!(!generated.contains("!{{site_name}}!"));
         assert!(!generated.contains("!{{site_path}}!"));
         assert!(!generated.contains("!{{ssl_path}}!"));
-        
+
         // Verify actual values are present
         assert!(generated.contains("secure.example.com"));
         assert!(generated.contains("/var/www/html/secure.example.com"));
@@ -341,7 +332,7 @@ mod tests {
             "example.com".to_string(),
             "/var/www/html".to_string(),
             "/etc/nginx/conf.d".to_string(),
-            false,  // No SSL
+            false, // No SSL
         );
 
         // This should panic
@@ -359,11 +350,11 @@ mod tests {
 
         let http_generated = config.generate_config(NginxProtocol::Http);
         let https_generated = config.generate_config(NginxProtocol::Https);
-        
+
         // Verify domain with hyphens and subdomains is correctly replaced in both
         assert!(http_generated.contains("my-site.sub.example.com"));
         assert!(http_generated.contains("/var/www/html/my-site.sub.example.com"));
-        
+
         assert!(https_generated.contains("my-site.sub.example.com"));
         assert!(https_generated.contains("/var/www/html/my-site.sub.example.com"));
         assert!(https_generated.contains("/etc/nginx/ssl/my-site.sub.example.com"));
@@ -385,7 +376,7 @@ mod tests {
         assert!(!http_generated.contains("!{{"));
         assert!(!http_generated.contains("}}!"));
         assert!(http_generated.contains("/custom/www/complete.test.com"));
-        
+
         // Ensure no unreplaced placeholders remain in HTTPS
         assert!(!https_generated.contains("!{{"));
         assert!(!https_generated.contains("}}!"));
@@ -410,7 +401,7 @@ mod tests {
         );
 
         let http_config = config.generate_config(NginxProtocol::Http);
-        
+
         // Should only contain HTTP configuration, not HTTPS
         assert!(http_config.contains("listen 80"));
         assert!(!http_config.contains("listen 443"));
@@ -428,7 +419,7 @@ mod validation_tests {
     fn test_validate_nginx_configuration() {
         // This test requires nginx to be installed on the system
         let result = validate_nginx_configuration();
-        
+
         // We can't guarantee the outcome, but it should return a Result
         match result {
             Ok(()) => println!("System nginx config is valid"),
