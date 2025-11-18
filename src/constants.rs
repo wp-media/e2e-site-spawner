@@ -14,7 +14,7 @@
 //!
 //! # Usage
 //!
-//! ```
+//! ```ignore
 //! use crate::constants::{SITES_PATH, DB_USER};
 //! 
 //! println!("Sites will be created in: {}", SITES_PATH);

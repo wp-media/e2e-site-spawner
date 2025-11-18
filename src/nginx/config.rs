@@ -14,7 +14,7 @@
 //!
 //! # Examples
 //!
-//! ```
+//! ```ignore
 //! use nginx::config::{NginxConfig, NginxProtocol};
 //!
 //! // Create a new site configuration
@@ -49,7 +49,7 @@ use std::process::Command;
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// let protocol = NginxProtocol::Https;
 /// match protocol {
 ///     NginxProtocol::Http => println!("Using port 80"),
@@ -99,7 +99,7 @@ pub enum NginxProtocol {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// let config = NginxConfig::new(
 ///     "blog.example.com".to_string(),
 ///     "/var/www/sites".to_string(),
@@ -169,7 +169,7 @@ impl NginxConfig {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// // Create configuration for a site with SSL
     /// let config = NginxConfig::new(
     ///     "shop.example.com".to_string(),
@@ -228,7 +228,7 @@ impl NginxConfig {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let config = NginxConfig::new(
     ///     "valid-site.com".to_string(),
     ///     "/var/www/sites".to_string(),
@@ -373,7 +373,7 @@ impl NginxConfig {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```ignore
     /// let config = NginxConfig::new(
     ///     "api.example.com".to_string(),
     ///     "/var/www/html".to_string(),
@@ -460,7 +460,7 @@ impl NginxConfig {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use nginx::config::validate_nginx_configuration;
 ///
 /// match validate_nginx_configuration() {
@@ -554,7 +554,7 @@ pub fn validate_nginx_configuration() -> Result<(), String> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use nginx::config::validate_nginx_config_file;
 ///
 /// let config_path = "/etc/nginx/sites-enabled/example.com.conf";

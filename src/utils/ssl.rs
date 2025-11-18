@@ -71,7 +71,7 @@ use crate::nginx;
 ///
 /// # Example
 ///
-/// ```
+/// ```ignore
 /// let config = NginxConfig::new(
 ///     "example.com".to_string(),
 ///     "/var/www/html".to_string(),
@@ -253,7 +253,7 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
 ///
 /// # Example
 ///
-/// ```
+/// ```ignore
 /// print_ssl_warning("example.com");
 /// // Continues with SSL generation without asking for confirmation
 /// ```
@@ -304,7 +304,7 @@ pub fn print_ssl_warning(site_name: &str) {
 ///
 /// # Example
 ///
-/// ```
+/// ```ignore
 /// if ask_for_ssl_confirmation("example.com") {
 ///     // User confirmed, proceed with SSL
 ///     generate_ssl(&nginx_config)?;

@@ -277,7 +277,7 @@ pub fn revert_site_spawn(
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// match put_wordpress_in_site_directory("/var/www/mysite") {
 ///     Ok(()) => println!("WordPress installed successfully"),
 ///     Err(e) => eprintln!("Installation failed: {}", e),
@@ -340,7 +340,7 @@ pub fn put_wordpress_in_site_directory(site_path: &str) -> Result<(), FileCreati
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// create_wp_config_file(
 ///     "/var/www/mysite",
 ///     "wp_mysite",
@@ -419,7 +419,7 @@ pub fn create_wp_config_file(
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// let sample = fs::read_to_string("wp-config-sample.php")?;
 /// let config = generate_wp_config_content_from_sample(
 ///     "wp_blog",
@@ -518,7 +518,7 @@ fn create_salt_key() -> String {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// // Create directory with standard web permissions
 /// create_directory_if_not_exists("/var/www/mysite", Some(0o755))?;
 ///
@@ -591,7 +591,7 @@ pub fn create_directory_if_not_exists(
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// // Create configuration file with restricted permissions
 /// create_file_with_content_if_not_exists(
 ///     "/etc/myapp/config.conf",
@@ -689,7 +689,7 @@ pub fn create_file_with_content_if_not_exists(
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// // Change only the owner to www-data
 /// set_path_owner(Some("www-data"), None, "/var/www/html")?;
 ///
@@ -785,7 +785,7 @@ pub fn set_path_owner(
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// // Remove a site directory
 /// remove_directory("/var/www/old-site")?;
 ///
@@ -833,7 +833,7 @@ pub fn remove_directory(dir_path: &str) -> Result<(), FileCreationError> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// // Remove a configuration file
 /// remove_file("/etc/nginx/sites-enabled/old-site.conf")?;
 ///

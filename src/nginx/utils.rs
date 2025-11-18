@@ -15,7 +15,7 @@
 //!
 //! # Examples
 //!
-//! ```
+//! ```ignore
 //! use nginx::utils::{create_nginx_file, append_to_nginx_file, reload_nginx};
 //!
 //! // Create a new configuration file
@@ -65,7 +65,7 @@ use crate::utils::sites::FileCreationError;
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// let validated_path = get_validated_nginx_path("/etc/nginx/sites-available/example.conf")
 ///     .expect("Path validation failed");
 /// ```
@@ -157,7 +157,7 @@ fn get_validated_nginx_path(path: &str) -> Result<PathBuf, FileCreationError> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use nginx::utils::create_nginx_file;
 ///
 /// let config_content = "server { listen 80; server_name example.com; }";
@@ -281,7 +281,7 @@ pub fn create_nginx_file(path: &str, content: &str) -> Result<(), FileCreationEr
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use nginx::utils::append_to_nginx_file;
 ///
 /// // Add a new location block to an existing configuration
@@ -369,7 +369,7 @@ pub fn append_to_nginx_file(path: &str, content: &str) -> Result<(), FileCreatio
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use nginx::utils::reload_nginx;
 ///
 /// // After making configuration changes

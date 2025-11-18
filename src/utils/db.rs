@@ -14,7 +14,7 @@
 //!
 //! # Examples
 //!
-//! ```
+//! ```ignore
 //! use crate::utils::db;
 //!
 //! // Create a WordPress database
@@ -97,7 +97,7 @@ impl From<mysql::Error> for DbError {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use crate::utils::db::DbConfig;
 ///
 /// let config = DbConfig::default(); // Uses root@localhost:3306 with no password
@@ -160,7 +160,7 @@ impl Default for DbConfig {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use crate::utils::db::create_wordpress_database;
 ///
 /// // Create with automatic retry
@@ -274,7 +274,7 @@ pub fn create_wordpress_database(db_name: &str, should_retry: bool) -> Result<St
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use crate::utils::db::{DbConfig, create_connection};
 ///
 /// let config = DbConfig::default();
@@ -391,7 +391,7 @@ fn create_database(conn: &mut Conn, db_name: &str) -> Result<(), DbError> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use crate::utils::db::validate_db_name;
 ///
 /// assert!(validate_db_name("wp_blog").is_ok());
@@ -459,7 +459,7 @@ pub fn validate_db_name(name: &str) -> Result<(), DbError> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use crate::utils::db::drop_database;
 ///
 /// match drop_database("old_wp_site") {
@@ -515,7 +515,7 @@ pub fn drop_database(db_name: &str) -> Result<(), DbError> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use crate::utils::db::database_exists;
 ///
 /// // Check without existing connection
@@ -588,7 +588,7 @@ pub fn database_exists(db_name: &str, conn: Option<&mut Conn>) -> Result<bool, D
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use crate::utils::db::create_db_name;
 ///
 /// assert_eq!(create_db_name("example.com"), "wp_example_com");

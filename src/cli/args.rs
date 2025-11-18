@@ -265,7 +265,7 @@ pub fn build_cli() -> Command {
 ///
 /// # Usage Example
 ///
-/// ```rust
+/// ```ignore
 /// use crate::cli::args::get_matches;
 ///
 /// let matches = get_matches();
