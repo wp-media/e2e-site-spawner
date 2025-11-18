@@ -612,6 +612,8 @@ pub fn create_db_name(site_name: &str) -> String {
 mod tests {
     use super::*;
 
+    // ===== Database Name Validation Tests =====
+
     #[test]
     fn test_valid_db_names() {
         assert!(validate_db_name("wordpress_db").is_ok());
@@ -619,17 +621,71 @@ mod tests {
         assert!(validate_db_name("test_database").is_ok());
         assert!(validate_db_name("a").is_ok());
         assert!(validate_db_name("_underscore_start").is_ok());
+        
+        // Additional valid cases
+        assert!(validate_db_name("UPPERCASE").is_ok());
+        assert!(validate_db_name("MixedCase_123").is_ok());
+        assert!(validate_db_name(&"a".repeat(64)).is_ok()); // Max length
     }
 
     #[test]
     fn test_invalid_db_names() {
+        // Empty name
         assert!(validate_db_name("").is_err());
+        
+        // Starts with number
         assert!(validate_db_name("123_starts_with_number").is_err());
+        assert!(validate_db_name("9test").is_err());
+        
+        // Invalid characters
         assert!(validate_db_name("has-dashes").is_err());
         assert!(validate_db_name("has spaces").is_err());
         assert!(validate_db_name("has.dots").is_err());
+        assert!(validate_db_name("special@char").is_err());
+        assert!(validate_db_name("emoji😀").is_err());
+        assert!(validate_db_name("tab\ttab").is_err());
+        assert!(validate_db_name("newline\n").is_err());
+        
+        // Too long (>64 chars)
         assert!(validate_db_name(&"a".repeat(65)).is_err());
+        assert!(validate_db_name(&"x".repeat(100)).is_err());
     }
+
+    #[test]
+    fn test_validate_db_name_error_messages() {
+        // Test specific error messages
+        match validate_db_name("") {
+            Err(DbError::InvalidDatabaseName(msg)) => {
+                assert!(msg.contains("empty"));
+            }
+            _ => panic!("Expected InvalidDatabaseName error for empty string"),
+        }
+
+        match validate_db_name("123abc") {
+            Err(DbError::InvalidDatabaseName(msg)) => {
+                assert!(msg.contains("start with a number"));
+            }
+            _ => panic!("Expected InvalidDatabaseName error for number start"),
+        }
+
+        match validate_db_name(&"a".repeat(65)) {
+            Err(DbError::InvalidDatabaseName(msg)) => {
+                assert!(msg.contains("too long"));
+                assert!(msg.contains("64"));
+            }
+            _ => panic!("Expected InvalidDatabaseName error for too long"),
+        }
+
+        match validate_db_name("test-db") {
+            Err(DbError::InvalidDatabaseName(msg)) => {
+                assert!(msg.contains("alphanumeric"));
+                assert!(msg.contains("underscores"));
+            }
+            _ => panic!("Expected InvalidDatabaseName error for invalid chars"),
+        }
+    }
+
+    // ===== Database Name Creation Tests =====
 
     #[test]
     fn test_create_db_name() {
@@ -637,7 +693,44 @@ mod tests {
         assert_eq!(create_db_name("sub.example.com"), "wp_sub_example_com");
         assert_eq!(create_db_name("my-site"), "wp_my_site");
         assert_eq!(create_db_name("test-blog.example.com"), "wp_test_blog_example_com");
+        
+        // Edge cases
+        assert_eq!(create_db_name(""), "wp_");
+        assert_eq!(create_db_name("..."), "wp____");  // Fixed: wp_ + ___ = wp____
+        assert_eq!(create_db_name("---"), "wp____");  // Fixed: wp_ + ___ = wp____
+        assert_eq!(create_db_name("site"), "wp_site");
+        assert_eq!(create_db_name("UPPERCASE.COM"), "wp_UPPERCASE_COM");
+        
+        // Additional edge cases to clarify the pattern
+        assert_eq!(create_db_name("."), "wp__");      // wp_ + _ = wp__
+        assert_eq!(create_db_name(".."), "wp___");    // wp_ + __ = wp___
+        assert_eq!(create_db_name("-"), "wp__");      // wp_ + _ = wp__
+        assert_eq!(create_db_name("--"), "wp___");    // wp_ + __ = wp___
+        assert_eq!(create_db_name(".-"), "wp___");    // wp_ + __ = wp___
     }
+
+    #[test]
+    fn test_create_db_name_produces_valid_names() {
+        // Ensure created names are valid
+        let test_sites = vec![
+            "example.com",
+            "my-site.org",
+            "sub.domain.example.com",
+            "test-123.local",
+        ];
+
+        for site in test_sites {
+            let db_name = create_db_name(site);
+            assert!(
+                validate_db_name(&db_name).is_ok(),
+                "Generated name '{}' from '{}' should be valid",
+                db_name,
+                site
+            );
+        }
+    }
+
+    // ===== Error Type Tests =====
 
     #[test]
     fn test_db_error_display() {
@@ -649,7 +742,73 @@ mod tests {
 
         let err = DbError::InvalidDatabaseName("bad name".to_string());
         assert_eq!(err.to_string(), "Invalid database name: bad name");
+
+        let err = DbError::MySqlError("syntax error".to_string());
+        assert_eq!(err.to_string(), "MySQL error: syntax error");
+
+        let err = DbError::PermissionDenied("access denied".to_string());
+        assert_eq!(err.to_string(), "Permission denied: access denied");
     }
+
+    #[test]
+    fn test_db_error_from_mysql_error() {
+        // Test error code mapping
+        
+        // Database exists (1007)
+        let mysql_err = mysql::Error::MySqlError(mysql::MySqlError {
+            state: "HY000".to_string(),
+            code: 1007,
+            message: "Can't create database 'test'; database exists".to_string(),
+        });
+        
+        match DbError::from(mysql_err) {
+            DbError::DatabaseExists(msg) => {
+                assert!(msg.contains("database exists"));
+            }
+            _ => panic!("Expected DatabaseExists error"),
+        }
+
+        // Access denied (1044)
+        let mysql_err = mysql::Error::MySqlError(mysql::MySqlError {
+            state: "42000".to_string(),
+            code: 1044,
+            message: "Access denied for user".to_string(),
+        });
+        
+        match DbError::from(mysql_err) {
+            DbError::PermissionDenied(msg) => {
+                assert!(msg.contains("Access denied"));
+            }
+            _ => panic!("Expected PermissionDenied error"),
+        }
+
+        // Generic MySQL error
+        let mysql_err = mysql::Error::MySqlError(mysql::MySqlError {
+            state: "42000".to_string(),
+            code: 1064,
+            message: "You have an error in your SQL syntax".to_string(),
+        });
+        
+        match DbError::from(mysql_err) {
+            DbError::MySqlError(msg) => {
+                assert!(msg.contains("SQL syntax"));
+            }
+            _ => panic!("Expected MySqlError"),
+        }
+    }
+
+    // ===== Configuration Tests =====
+
+    #[test]
+    fn test_db_config_default() {
+        let config = DbConfig::default();
+        assert_eq!(config.host, DB_HOST);
+        assert_eq!(config.port, 3306);
+        assert_eq!(config.user, DB_ROOT_USER);
+        assert_eq!(config.password, None);
+    }
+
+    // ===== Integration Tests (require MySQL) =====
 
     #[test]
     #[ignore] // Requires MySQL server
@@ -659,5 +818,252 @@ mod tests {
             Ok(_) => println!("Connection successful"),
             Err(e) => println!("Expected in test environment: {}", e),
         }
+    }
+
+    #[test]
+    #[ignore] // Requires MySQL server
+    fn test_create_wordpress_database_without_retry() {
+        let db_name = format!("wp_test_{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs());
+
+        // First creation should succeed
+        match create_wordpress_database(&db_name, false) {
+            Ok(created_name) => {
+                assert_eq!(created_name, db_name);
+                // Clean up
+                let _ = drop_database(&db_name);
+            }
+            Err(e) => {
+                println!("Test skipped - MySQL not available: {}", e);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore] // Requires MySQL server
+    fn test_create_wordpress_database_with_retry() {
+        let base_name = format!("wp_test_{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs());
+
+        // Create first database
+        match create_wordpress_database(&base_name, false) {
+            Ok(_) => {
+                // Try to create again with retry - should add suffix
+                match create_wordpress_database(&base_name, true) {
+                    Ok(created_name) => {
+                        assert_ne!(created_name, base_name);
+                        assert!(created_name.starts_with(&base_name));
+                        assert!(created_name.contains("_1"));
+                        
+                        // Clean up both
+                        let _ = drop_database(&base_name);
+                        let _ = drop_database(&created_name);
+                    }
+                    Err(e) => panic!("Retry should have succeeded: {}", e),
+                }
+            }
+            Err(e) => {
+                println!("Test skipped - MySQL not available: {}", e);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore] // Requires MySQL server
+    fn test_database_exists() {
+        let db_name = format!("wp_test_exists_{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs());
+
+        // Check non-existent database
+        match database_exists(&db_name, None) {
+            Ok(exists) => {
+                assert!(!exists, "Database should not exist initially");
+                
+                // Create database
+                if create_wordpress_database(&db_name, false).is_ok() {
+                    // Check it now exists
+                    match database_exists(&db_name, None) {
+                        Ok(exists) => {
+                            assert!(exists, "Database should exist after creation");
+                        }
+                        Err(e) => panic!("Failed to check existence: {}", e),
+                    }
+                    
+                    // Clean up
+                    let _ = drop_database(&db_name);
+                    
+                    // Check it's gone
+                    match database_exists(&db_name, None) {
+                        Ok(exists) => {
+                            assert!(!exists, "Database should not exist after drop");
+                        }
+                        Err(e) => panic!("Failed to check after drop: {}", e),
+                    }
+                }
+            }
+            Err(e) => {
+                println!("Test skipped - MySQL not available: {}", e);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore] // Requires MySQL server
+    fn test_database_exists_with_connection_reuse() {
+        let config = DbConfig::default();
+        
+        match create_connection(&config) {
+            Ok(mut conn) => {
+                let db_names = vec!["information_schema", "mysql", "performance_schema"];
+                
+                for db_name in db_names {
+                    match database_exists(db_name, Some(&mut conn)) {
+                        Ok(exists) => {
+                            println!("System database '{}' exists: {}", db_name, exists);
+                            // These system databases should typically exist
+                        }
+                        Err(e) => {
+                            println!("Failed to check {}: {}", db_name, e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                println!("Test skipped - MySQL not available: {}", e);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore] // Requires MySQL server
+    fn test_drop_database() {
+        let db_name = format!("wp_test_drop_{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs());
+
+        // Create a database first
+        match create_wordpress_database(&db_name, false) {
+            Ok(_) => {
+                // Verify it exists
+                assert!(database_exists(&db_name, None).unwrap_or(false));
+                
+                // Drop it
+                match drop_database(&db_name) {
+                    Ok(()) => {
+                        // Verify it's gone
+                        assert!(!database_exists(&db_name, None).unwrap_or(true));
+                    }
+                    Err(e) => panic!("Failed to drop database: {}", e),
+                }
+                
+                // Drop again should succeed (IF EXISTS clause)
+                match drop_database(&db_name) {
+                    Ok(()) => {
+                        // Should succeed even though database doesn't exist
+                    }
+                    Err(e) => panic!("Drop non-existent should succeed: {}", e),
+                }
+            }
+            Err(e) => {
+                println!("Test skipped - MySQL not available: {}", e);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore] // Requires MySQL server
+    fn test_create_database_max_retries() {
+        let base_name = format!("wp_test_max_{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs());
+
+        let config = DbConfig::default();
+        let mut conn = match create_connection(&config) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("Test skipped - MySQL not available: {}", e);
+                return;
+            }
+        };
+
+        // Create databases with all possible suffixes (0-20)
+        let mut created_dbs = Vec::new();
+        
+        // Create base database
+        if create_wordpress_database(&base_name, false).is_ok() {
+            created_dbs.push(base_name.clone());
+            
+            // Create _1 through _20
+            for i in 1..=20 {
+                let name = format!("{}_{}", base_name, i);
+                if create_database(&mut conn, &name).is_ok() {
+                    created_dbs.push(name);
+                }
+            }
+            
+            // Now try to create with retry - should fail after exhausting retries
+            match create_wordpress_database(&base_name, true) {
+                Ok(_) => panic!("Should have failed after exhausting retries"),
+                Err(DbError::DatabaseExists(msg)) => {
+                    assert!(msg.contains("20"));
+                    assert!(msg.contains("variations"));
+                }
+                Err(e) => panic!("Unexpected error: {}", e),
+            }
+            
+            // Clean up all created databases
+            for db in created_dbs {
+                let _ = drop_database(&db);
+            }
+        }
+    }
+
+    // ===== Unit Tests for Private Functions (via public interface) =====
+
+    #[test]
+    fn test_create_db_name_length_validation() {
+        // Create a site name that would result in a database name > 64 chars
+        let long_site = "a".repeat(62); // "wp_" + 62 chars = 65 chars
+        let db_name = create_db_name(&long_site);
+        
+        // The created name will be too long
+        assert_eq!(db_name.len(), 65);
+        assert!(validate_db_name(&db_name).is_err());
+    }
+
+    #[test]
+    fn test_error_trait_implementation() {
+        // Verify Error trait is properly implemented
+        let err = DbError::ConnectionError("test".to_string());
+        
+        // Should be usable as std::error::Error
+        let _: &dyn std::error::Error = &err;
+        
+        // Display trait should work
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_db_config_custom() {
+        // Test that we can create custom configs (even though not exposed publicly)
+        let config = DbConfig {
+            host: "custom.host".to_string(),
+            port: 3307,
+            user: "custom_user".to_string(),
+            password: Some("password123".to_string()),
+        };
+        
+        assert_eq!(config.host, "custom.host");
+        assert_eq!(config.port, 3307);
+        assert_eq!(config.user, "custom_user");
+        assert_eq!(config.password, Some("password123".to_string()));
     }
 }

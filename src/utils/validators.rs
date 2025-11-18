@@ -207,6 +207,10 @@ mod tests {
         assert!(validate_site_name("EXAMPLE.COM"));
         assert!(validate_site_name("Example.Com"));
         assert!(validate_site_name("eXaMpLe.CoM"));
+        
+        // Mixed numeric and alphabetic
+        assert!(validate_site_name("3com.example.org"));
+        assert!(validate_site_name("1and1.hosting.com"));
     }
 
     #[test]
@@ -219,6 +223,10 @@ mod tests {
         assert!(!validate_site_name(""));
         assert!(!validate_site_name(" "));
         assert!(!validate_site_name("example .com"));
+        assert!(!validate_site_name(" example.com"));
+        assert!(!validate_site_name("example.com "));
+        assert!(!validate_site_name("\t"));
+        assert!(!validate_site_name("\n"));
 
         // Invalid characters
         assert!(!validate_site_name("exam_ple.com"));
@@ -227,12 +235,40 @@ mod tests {
         assert!(!validate_site_name("exämple.com"));
         assert!(!validate_site_name("example@.com"));
         assert!(!validate_site_name("example#.com"));
+        assert!(!validate_site_name("example$.com"));
+        assert!(!validate_site_name("example%.com"));
+        assert!(!validate_site_name("example^.com"));
+        assert!(!validate_site_name("example&.com"));
+        assert!(!validate_site_name("example*.com"));
+        assert!(!validate_site_name("example(.com"));
+        assert!(!validate_site_name("example).com"));
+        assert!(!validate_site_name("example[.com"));
+        assert!(!validate_site_name("example].com"));
+        assert!(!validate_site_name("example{.com"));
+        assert!(!validate_site_name("example}.com"));
+        assert!(!validate_site_name("example\\.com"));
+        assert!(!validate_site_name("example/.com"));
+        assert!(!validate_site_name("example:.com"));
+        assert!(!validate_site_name("example;.com"));
+        assert!(!validate_site_name("example'.com"));
+        assert!(!validate_site_name("example\".com"));
+        assert!(!validate_site_name("example<.com"));
+        assert!(!validate_site_name("example>.com"));
+        assert!(!validate_site_name("example?.com"));
+        assert!(!validate_site_name("example,.com"));
+        assert!(!validate_site_name("example|.com"));
+        assert!(!validate_site_name("example~.com"));
+        assert!(!validate_site_name("example`.com"));
+        assert!(!validate_site_name("example=.com"));
+        assert!(!validate_site_name("example+.com"));
 
         // Invalid hyphens
         assert!(!validate_site_name("-example.com"));
         assert!(!validate_site_name("example-.com"));
         assert!(!validate_site_name("example.-com"));
         assert!(!validate_site_name("example.com-"));
+        assert!(!validate_site_name("--example.com"));
+        assert!(!validate_site_name("example--.com"));
 
         // Invalid dots
         assert!(!validate_site_name(".example.com"));
@@ -240,6 +276,9 @@ mod tests {
         assert!(!validate_site_name("example..com"));
         assert!(!validate_site_name("example."));
         assert!(!validate_site_name("..."));
+        assert!(!validate_site_name("example...com"));
+        assert!(!validate_site_name("."));
+        assert!(!validate_site_name(".."));
 
         // Too long label (over 63 chars)
         let long_label = format!("{}.com", "a".repeat(64));
@@ -250,12 +289,17 @@ mod tests {
         assert!(!validate_site_name("example.c"));        // Single char TLD
         assert!(!validate_site_name("example.com-"));     // TLD with hyphen
         assert!(!validate_site_name("example.c0m"));      // TLD with number
+        assert!(!validate_site_name("example.-com"));     // TLD starting with hyphen
+        assert!(!validate_site_name("example.co-m"));     // TLD containing hyphen
     }
 
     #[test]
     fn test_edge_cases() {
         // Minimum valid domain (2 chars + dot + 2 chars = 5 chars total)
         assert!(validate_site_name("a.co"));
+        assert!(validate_site_name("aa.bb"));
+        assert!(validate_site_name("a1.co"));
+        assert!(validate_site_name("1a.co"));
 
         // Maximum label length (63 chars)
         let max_label = format!("{}.com", "a".repeat(63));
@@ -273,6 +317,7 @@ mod tests {
 
         // Hyphen in middle
         assert!(validate_site_name("my-awesome-site.example.com"));
+        assert!(validate_site_name("a-b-c.d-e-f.example.com"));
         
         // Maximum total length (253 chars)
         // Create a domain with multiple 63-char labels
@@ -284,6 +329,29 @@ mod tests {
         );
         assert!(long_domain.len() <= 253);
         assert!(validate_site_name(&long_domain));
+        
+        // Domain at exactly 253 characters
+        // 63 + 1 + 63 + 1 + 63 + 1 + 61 = 253
+        let exact_253 = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        assert_eq!(exact_253.len(), 253);
+        assert!(validate_site_name(&exact_253));
+        
+        // Domain at 254 characters (should fail)
+        let over_253 = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(62)
+        );
+        assert_eq!(over_253.len(), 254);
+        assert!(!validate_site_name(&over_253));
     }
 
     #[test]
@@ -295,19 +363,63 @@ mod tests {
         assert!(validate_label("1"));
         assert!(validate_label("a1"));
         assert!(validate_label("1a"));
+        assert!(validate_label("A"));
+        assert!(validate_label("Z"));
+        assert!(validate_label("aZ"));
+        assert!(validate_label("Za"));
+        assert!(validate_label("a-b"));
+        assert!(validate_label("a-b-c"));
+        assert!(validate_label("test-123-abc"));
         
         // 63 character label (maximum)
         assert!(validate_label(&"a".repeat(63)));
+        assert!(validate_label(&format!("a{}b", "-".repeat(61))));
         
         // Invalid labels
         assert!(!validate_label(""));                    // Empty
         assert!(!validate_label("-test"));               // Starts with hyphen
         assert!(!validate_label("test-"));               // Ends with hyphen
+        assert!(!validate_label("-"));                  // Just hyphen
+        assert!(!validate_label("--"));                 // Just hyphens
         assert!(!validate_label("test_123"));            // Contains underscore
         assert!(!validate_label("test.com"));            // Contains dot
         assert!(!validate_label(&"a".repeat(64)));       // Too long (64 chars)
         assert!(!validate_label("test name"));           // Contains space
         assert!(!validate_label("test@123"));            // Contains @
+        assert!(!validate_label("test!"));               // Contains !
+        assert!(!validate_label("test?"));               // Contains ?
+        assert!(!validate_label("test#"));               // Contains #
+        assert!(!validate_label("test$"));               // Contains $
+        assert!(!validate_label("test%"));               // Contains %
+        assert!(!validate_label("test^"));               // Contains ^
+        assert!(!validate_label("test&"));               // Contains &
+        assert!(!validate_label("test*"));               // Contains *
+        assert!(!validate_label("test("));               // Contains (
+        assert!(!validate_label("test)"));               // Contains )
+        assert!(!validate_label("test["));               // Contains [
+        assert!(!validate_label("test]"));               // Contains ]
+        assert!(!validate_label("test{"));               // Contains {
+        assert!(!validate_label("test}"));               // Contains }
+        assert!(!validate_label("test\\"));              // Contains \
+        assert!(!validate_label("test/"));               // Contains /
+        assert!(!validate_label("test:"));               // Contains :
+        assert!(!validate_label("test;"));               // Contains ;
+        assert!(!validate_label("test'"));               // Contains '
+        assert!(!validate_label("test\""));              // Contains "
+        assert!(!validate_label("test<"));               // Contains <
+        assert!(!validate_label("test>"));               // Contains >
+        assert!(!validate_label("test,"));               // Contains ,
+        assert!(!validate_label("test|"));               // Contains |
+        assert!(!validate_label("test~"));               // Contains ~
+        assert!(!validate_label("test`"));               // Contains `
+        assert!(!validate_label("test="));               // Contains =
+        assert!(!validate_label("test+"));               // Contains +
+        
+        // Unicode characters (should fail - ASCII only)
+        assert!(!validate_label("café"));
+        assert!(!validate_label("北京"));
+        assert!(!validate_label("मुंबई"));
+        assert!(!validate_label("🚀"));
     }
 
     #[test]
@@ -327,5 +439,159 @@ mod tests {
         // E2E testing patterns
         assert!(validate_site_name("test-001.e2e.example.com"));
         assert!(validate_site_name("feature-branch-123.staging.example.dev"));
+        
+        // Common TLDs
+        assert!(validate_site_name("example.com"));
+        assert!(validate_site_name("example.net"));
+        assert!(validate_site_name("example.org"));
+        assert!(validate_site_name("example.edu"));
+        assert!(validate_site_name("example.gov"));
+        assert!(validate_site_name("example.mil"));
+        assert!(validate_site_name("example.info"));
+        assert!(validate_site_name("example.biz"));
+        assert!(validate_site_name("example.name"));
+        assert!(validate_site_name("example.museum"));
+        assert!(validate_site_name("example.coop"));
+        assert!(validate_site_name("example.aero"));
+        assert!(validate_site_name("example.pro"));
+        assert!(validate_site_name("example.tel"));
+        assert!(validate_site_name("example.travel"));
+        assert!(validate_site_name("example.xxx"));
+        assert!(validate_site_name("example.io"));
+        assert!(validate_site_name("example.app"));
+        assert!(validate_site_name("example.dev"));
+        assert!(validate_site_name("example.ai"));
+        assert!(validate_site_name("example.cloud"));
+        
+        // Country code TLDs
+        assert!(validate_site_name("example.uk"));
+        assert!(validate_site_name("example.us"));
+        assert!(validate_site_name("example.ca"));
+        assert!(validate_site_name("example.au"));
+        assert!(validate_site_name("example.de"));
+        assert!(validate_site_name("example.fr"));
+        assert!(validate_site_name("example.jp"));
+        assert!(validate_site_name("example.cn"));
+        assert!(validate_site_name("example.in"));
+        assert!(validate_site_name("example.br"));
+        
+        // Multi-level TLDs
+        assert!(validate_site_name("example.co.uk"));
+        assert!(validate_site_name("example.co.jp"));
+        assert!(validate_site_name("example.com.au"));
+        assert!(validate_site_name("example.com.br"));
+        assert!(validate_site_name("example.co.in"));
+        assert!(validate_site_name("example.org.uk"));
+        assert!(validate_site_name("example.ac.uk"));
+        assert!(validate_site_name("example.gov.uk"));
+    }
+
+    /// Tests for boundary conditions and RFC compliance
+    #[test]
+    fn test_rfc_compliance() {
+        // RFC 1035: Labels must be 63 octets or less
+        let label_63 = format!("{}.com", "a".repeat(63));
+        assert!(validate_site_name(&label_63));
+        
+        let label_64 = format!("{}.com", "a".repeat(64));
+        assert!(!validate_site_name(&label_64));
+        
+        // RFC 1035: Total domain name must be 253 characters or less
+        // This is for the wire format, excluding the final dot
+        let domain_253 = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        assert_eq!(domain_253.len(), 253);
+        assert!(validate_site_name(&domain_253));
+        
+        let domain_254 = format!("{}.com", "a".repeat(250));
+        assert!(domain_254.len() > 253);
+        assert!(!validate_site_name(&domain_254));
+        
+        // RFC 1123: Allows digits at the start of labels
+        assert!(validate_site_name("123start.example.com"));
+        assert!(validate_site_name("999.example.com"));
+        
+        // RFC 952: Originally didn't allow digits at start, but RFC 1123 relaxed this
+        assert!(validate_site_name("3com.example.com"));
+    }
+
+    /// Tests specific patterns that have caused issues in the past
+    #[test]
+    fn test_regression_cases() {
+        // Double hyphens in middle (should be valid)
+        assert!(validate_site_name("test--site.example.com"));
+        
+        // Single character labels (valid)
+        assert!(validate_site_name("a.b.example.com"));
+        assert!(validate_site_name("1.2.example.com"));
+        
+        // All numeric subdomain (valid)
+        assert!(validate_site_name("192.168.example.com"));
+        
+        // Looks like IP but has TLD (valid as domain)
+        assert!(validate_site_name("192.168.1.example.com"));
+        
+        // Not actually an IP (has non-numeric parts)
+        assert!(validate_site_name("192.168.1.1.com"));
+        
+        // Mixed case throughout
+        assert!(validate_site_name("WwW.GoOgLe.CoM"));
+        assert!(validate_site_name("API.v2.Example.COM"));
+    }
+
+    /// Performance test for validation function
+    #[test]
+    fn test_performance_characteristics() {
+        // Test that validation is efficient even for maximum-length domains
+        let start = std::time::Instant::now();
+        
+        // Create and validate 1000 maximum-length domains
+        for i in 0..1000 {
+            let domain = format!(
+                "test{}.{}.{}.com",
+                i % 100,
+                "a".repeat(60),
+                "b".repeat(60)
+            );
+            let _ = validate_site_name(&domain);
+        }
+        
+        let duration = start.elapsed();
+        
+        // Should complete in reasonable time (< 100ms for 1000 validations)
+        assert!(
+            duration.as_millis() < 100,
+            "Validation took too long: {:?}",
+            duration
+        );
+    }
+
+    /// Tests for common typos and user errors
+    #[test]
+    fn test_common_user_errors() {
+        // URL instead of domain
+        assert!(!validate_site_name("http://example.com"));
+        assert!(!validate_site_name("https://example.com"));
+        assert!(!validate_site_name("ftp://example.com"));
+        assert!(!validate_site_name("www.example.com/path"));
+        assert!(!validate_site_name("example.com:8080"));
+        assert!(!validate_site_name("user@example.com"));
+        
+        // IP addresses (not valid domains for our purposes)
+        assert!(!validate_site_name("192.168.1.1"));
+        assert!(!validate_site_name("10.0.0.1"));
+        assert!(!validate_site_name("::1"));
+        assert!(!validate_site_name("2001:db8::1"));
+        
+        // Common typos
+        assert!(!validate_site_name("example,com"));        // Comma instead of dot
+        assert!(!validate_site_name("example;com"));        // Semicolon instead of dot
+        assert!(!validate_site_name("example:com"));        // Colon instead of dot
+        assert!(!validate_site_name("example com"));        // Space instead of dot
     }
 }

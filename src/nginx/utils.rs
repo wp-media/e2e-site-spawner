@@ -122,7 +122,8 @@ fn get_validated_nginx_path(path: &str) -> Result<PathBuf, FileCreationError> {
         "/etc/nginx/",
         "/usr/local/nginx/",
         "/var/www/",
-        "/tmp/", // For testing
+        "/tmp/",
+        "/private/tmp/", // macOS canonical form of /tmp
     ];
 
     let path_str = absolute_path.to_string_lossy();
@@ -426,14 +427,47 @@ pub fn reload_nginx() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Counter for unique test directory names
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    // Helper function to create test paths in /tmp with unique names
+    fn create_test_dir() -> std::path::PathBuf {
+        let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let test_dir = format!("/tmp/nginx_test_{}_{}", std::process::id(), counter);
+        fs::create_dir_all(&test_dir).unwrap();
+        std::path::PathBuf::from(test_dir)
+    }
+
+    // Helper to clean up test directories
+    fn cleanup_test_dir(path: &std::path::Path) {
+        let _ = fs::remove_dir_all(path);
+    }
+
+    // ===== Path Validation Tests =====
 
     /// Tests that valid nginx paths are accepted
     #[test]
     fn test_get_validated_nginx_path_valid() {
-        let result = get_validated_nginx_path("/tmp/test.conf");
-        assert!(result.is_ok());
-        assert!(result.unwrap().to_string_lossy().ends_with("test.conf"));
+        // Test multiple valid prefixes
+        let test_paths = vec![
+            "/tmp/test.conf",
+            "/etc/nginx/sites-available/test.conf",
+            "/usr/local/nginx/conf.d/test.conf",
+            "/var/www/configs/test.conf",
+        ];
+
+        for path in test_paths {
+            let result = get_validated_nginx_path(path);
+            assert!(result.is_ok(), "Path {} should be valid", path);
+            assert!(
+                result.unwrap().to_string_lossy().ends_with("test.conf"),
+                "Path should end with test.conf"
+            );
+        }
     }
 
     /// Tests that empty paths are rejected
@@ -441,28 +475,89 @@ mod tests {
     fn test_get_validated_nginx_path_empty() {
         let result = get_validated_nginx_path("");
         assert!(matches!(result, Err(FileCreationError::InvalidPath(_))));
+        if let Err(FileCreationError::InvalidPath(msg)) = result {
+            assert!(msg.contains("empty"), "Error should mention empty path");
+        }
     }
 
     /// Tests that path traversal attempts are detected and rejected
     #[test]
     fn test_get_validated_nginx_path_traversal() {
-        let result = get_validated_nginx_path("/etc/nginx/../../../etc/passwd");
-        assert!(matches!(result, Err(FileCreationError::PathTraversal(_))));
+        let traversal_paths = vec![
+            "/etc/nginx/../../../etc/passwd",
+            "/tmp/../../../root/.ssh/id_rsa.conf",
+            "/etc/nginx/sites-available/../../shadow.conf",
+            "/tmp/..\\..\\windows\\system32\\config.conf", // Windows-style traversal
+            "/tmp/test/../../../etc/passwd.conf",
+        ];
+
+        for path in traversal_paths {
+            let result = get_validated_nginx_path(path);
+            assert!(
+                matches!(result, Err(FileCreationError::PathTraversal(_))),
+                "Path {} should be rejected as traversal",
+                path
+            );
+        }
     }
 
     /// Tests that files without .conf extension are rejected
     #[test]
     fn test_get_validated_nginx_path_wrong_extension() {
-        let result = get_validated_nginx_path("/tmp/test.txt");
-        assert!(matches!(result, Err(FileCreationError::InvalidPath(_))));
+        let invalid_extensions = vec![
+            "/tmp/test.txt",
+            "/tmp/test.cfg",
+            "/tmp/test.config",
+            "/tmp/test",
+            "/tmp/test.conf.bak",
+            "/etc/nginx/test.ini",
+        ];
+
+        for path in invalid_extensions {
+            let result = get_validated_nginx_path(path);
+            assert!(
+                matches!(result, Err(FileCreationError::InvalidPath(_))),
+                "Path {} should be rejected for wrong extension",
+                path
+            );
+            
+            if let Err(FileCreationError::InvalidPath(msg)) = result {
+                assert!(
+                    msg.contains(".conf"),
+                    "Error should mention .conf requirement"
+                );
+            }
+        }
     }
+
+    /// Tests that paths outside allowed directories are rejected
+    #[test]
+    fn test_get_validated_nginx_path_invalid_directory() {
+        let invalid_paths = vec![
+            "/home/user/test.conf",
+            "/opt/app/nginx.conf",
+            "/root/configs/test.conf",
+            "/bin/test.conf",
+        ];
+
+        for path in invalid_paths {
+            let result = get_validated_nginx_path(path);
+            assert!(
+                matches!(result, Err(FileCreationError::InvalidPath(_))),
+                "Path {} should be rejected as outside allowed directories",
+                path
+            );
+        }
+    }
+
+    // ===== File Creation Tests =====
 
     /// Tests successful creation of a valid nginx configuration file
     #[test]
     fn test_create_valid_nginx_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("test.conf");
-        let content = "server { listen 80; }";
+        let test_dir = create_test_dir();
+        let file_path = test_dir.join("test.conf");
+        let content = "server { listen 80; server_name example.com; }";
 
         let result = create_nginx_file(file_path.to_str().unwrap(), content);
         assert!(result.is_ok());
@@ -470,9 +565,56 @@ mod tests {
         // Verify file was created
         assert!(file_path.exists());
 
-        // Verify content
+        // Verify content matches exactly
         let written_content = fs::read_to_string(&file_path).unwrap();
         assert_eq!(written_content, content);
+
+        // Verify permissions on Unix
+        #[cfg(unix)]
+        {
+            let metadata = fs::metadata(&file_path).unwrap();
+            let permissions = metadata.permissions();
+            assert_eq!(
+                permissions.mode() & 0o777,
+                0o644,
+                "File should have 644 permissions"
+            );
+        }
+
+        cleanup_test_dir(&test_dir);
+    }
+
+    /// Tests creation with various valid nginx configurations
+    #[test]
+    fn test_create_nginx_file_various_configs() {
+        let test_dir = create_test_dir();
+        
+        let test_cases = vec![
+            ("minimal.conf", "server { listen 80; }"),
+            ("with_location.conf", "location /api { proxy_pass http://backend; }"),
+            (
+                "full.conf",
+                r#"server {
+                    listen 443 ssl;
+                    server_name example.com;
+                    ssl_certificate /etc/ssl/cert.pem;
+                    location / {
+                        try_files $uri $uri/ =404;
+                    }
+                }"#
+            ),
+        ];
+
+        for (filename, content) in test_cases {
+            let file_path = test_dir.join(filename);
+            let result = create_nginx_file(file_path.to_str().unwrap(), content);
+            assert!(result.is_ok(), "Failed to create {}", filename);
+            
+            let written = fs::read_to_string(&file_path).unwrap();
+            assert_eq!(written, content);
+        }
+
+        cleanup_test_dir(&test_dir);
     }
 
     /// Tests that path traversal attempts are rejected during file creation
@@ -485,8 +627,8 @@ mod tests {
     /// Tests that non-.conf files are rejected
     #[test]
     fn test_reject_non_conf_extension() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("test.txt");
+        let test_dir = create_test_dir();
+        let file_path = test_dir.join("test.txt");
 
         let result = create_nginx_file(file_path.to_str().unwrap(), "content");
         assert!(matches!(result, Err(FileCreationError::InvalidPath(_))));
@@ -502,18 +644,29 @@ mod tests {
     /// Tests that empty content is rejected
     #[test]
     fn test_reject_empty_content() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("test.conf");
+        let test_dir = create_test_dir();
+        let file_path = test_dir.join("test.conf");
 
-        let result = create_nginx_file(file_path.to_str().unwrap(), "   ");
-        assert!(matches!(result, Err(FileCreationError::InvalidPath(_))));
+        // Test various forms of empty content
+        let empty_contents = vec!["", "   ", "\t\n", "\n\n\n"];
+
+        for content in empty_contents {
+            let result = create_nginx_file(file_path.to_str().unwrap(), content);
+            assert!(
+                matches!(result, Err(FileCreationError::InvalidPath(_))),
+                "Content '{}' should be rejected as empty",
+                content.escape_debug()
+            );
+        }
+
+        cleanup_test_dir(&test_dir);
     }
 
     /// Tests that existing files cannot be overwritten
     #[test]
     fn test_reject_existing_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("test.conf");
+        let test_dir = create_test_dir();
+        let file_path = test_dir.join("test.conf");
         let content = "server { listen 80; }";
 
         // Create file first time - should succeed
@@ -523,17 +676,43 @@ mod tests {
         // Try to create same file again - should fail
         let result2 = create_nginx_file(file_path.to_str().unwrap(), content);
         assert!(result2.is_err());
-        assert!(matches!(
-            result2,
-            Err(FileCreationError::FileWriteFailed(_))
-        ));
+        
+        if let Err(FileCreationError::FileWriteFailed(msg)) = result2 {
+            assert!(
+                msg.contains("already exists"),
+                "Error should mention file exists"
+            );
+        } else {
+            panic!("Expected FileWriteFailed error");
+        }
+
+        cleanup_test_dir(&test_dir);
     }
+
+    /// Tests that parent directories are created if missing
+    #[test]
+    fn test_create_parent_directories() {
+        let test_dir = create_test_dir();
+        let nested_path = test_dir.join("nested/deep/dir/test.conf");
+        let content = "server { listen 80; }";
+
+        let result = create_nginx_file(nested_path.to_str().unwrap(), content);
+        assert!(result.is_ok());
+        assert!(nested_path.exists());
+        
+        // Verify all parent directories were created
+        assert!(nested_path.parent().unwrap().exists());
+
+        cleanup_test_dir(&test_dir);
+    }
+
+    // ===== Append Tests =====
 
     /// Tests successful appending to an existing file
     #[test]
     fn test_append_to_existing_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("test.conf");
+        let test_dir = create_test_dir();
+        let file_path = test_dir.join("test.conf");
         let initial_content = "server { listen 80; }";
         let append_content = "location / { return 200; }";
 
@@ -544,7 +723,7 @@ mod tests {
         let result = append_to_nginx_file(file_path.to_str().unwrap(), append_content);
         assert!(result.is_ok());
 
-        // Verify appended content
+        // Verify appended content with newline separator
         let full_content = fs::read_to_string(&file_path).unwrap();
         assert!(full_content.contains(initial_content));
         assert!(full_content.contains(append_content));
@@ -552,31 +731,204 @@ mod tests {
             full_content,
             format!("{}\n{}", initial_content, append_content)
         );
+
+        cleanup_test_dir(&test_dir);
+    }
+
+    /// Tests multiple appends maintain proper formatting
+    #[test]
+    fn test_multiple_appends() {
+        let test_dir = create_test_dir();
+        let file_path = test_dir.join("test.conf");
+        
+        // Create initial file
+        create_nginx_file(file_path.to_str().unwrap(), "server {").unwrap();
+        
+        // Append multiple times
+        let appends = vec![
+            "    listen 80;",
+            "    server_name example.com;",
+            "    location / {",
+            "        return 200;",
+            "    }",
+            "}",
+        ];
+        
+        for content in &appends {
+            append_to_nginx_file(file_path.to_str().unwrap(), content).unwrap();
+        }
+        
+        let final_content = fs::read_to_string(&file_path).unwrap();
+        
+        // Each append should be on its own line
+        let lines: Vec<&str> = final_content.lines().collect();
+        assert_eq!(lines[0], "server {");
+        for (i, expected) in appends.iter().enumerate() {
+            assert_eq!(lines[i + 1], *expected);
+        }
+
+        cleanup_test_dir(&test_dir);
     }
 
     /// Tests that appending to non-existent files fails
     #[test]
     fn test_append_to_non_existent_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("nonexistent.conf");
+        let test_dir = create_test_dir();
+        let file_path = test_dir.join("nonexistent.conf");
 
         let result = append_to_nginx_file(file_path.to_str().unwrap(), "content");
         assert!(result.is_err());
-        assert!(matches!(result, Err(FileCreationError::FileWriteFailed(_))));
+        
+        if let Err(FileCreationError::FileWriteFailed(msg)) = result {
+            assert!(
+                msg.contains("Cannot open file"),
+                "Error should mention cannot open file"
+            );
+        } else {
+            panic!("Expected FileWriteFailed error");
+        }
+
+        cleanup_test_dir(&test_dir);
     }
 
     /// Tests that empty content cannot be appended
     #[test]
     fn test_append_empty_content() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("test.conf");
+        let test_dir = create_test_dir();
+        let file_path = test_dir.join("test.conf");
 
         // Create initial file
         create_nginx_file(file_path.to_str().unwrap(), "server { }").unwrap();
 
-        // Try to append empty content
-        let result = append_to_nginx_file(file_path.to_str().unwrap(), "  ");
-        assert!(result.is_err());
-        assert!(matches!(result, Err(FileCreationError::InvalidPath(_))));
+        // Try to append various empty contents
+        let empty_contents = vec!["", "  ", "\n\n", "\t"];
+        
+        for content in empty_contents {
+            let result = append_to_nginx_file(file_path.to_str().unwrap(), content);
+            assert!(
+                result.is_err(),
+                "Empty content '{}' should be rejected",
+                content.escape_debug()
+            );
+            assert!(matches!(result, Err(FileCreationError::InvalidPath(_))));
+        }
+
+        cleanup_test_dir(&test_dir);
+    }
+
+    /// Tests append with path validation
+    #[test]
+    fn test_append_path_validation() {
+        // Test that append also validates paths properly
+        let invalid_paths = vec![
+            "/etc/nginx/../passwd",
+            "/home/user/test.conf",
+            "/tmp/test.txt",
+        ];
+        
+        for path in invalid_paths {
+            let result = append_to_nginx_file(path, "server { }");
+            assert!(result.is_err(), "Path {} should be rejected", path);
+        }
+    }
+
+    // ===== Integration Tests =====
+
+    /// Tests the complete workflow: create, append, and verify
+    #[test]
+    fn test_complete_workflow() {
+        let test_dir = create_test_dir();
+        let file_path = test_dir.join("workflow.conf");
+        let path_str = file_path.to_str().unwrap();
+        
+        // Step 1: Create initial config
+        let initial = "server {\n    listen 80;\n    server_name example.com;";
+        create_nginx_file(path_str, initial).unwrap();
+        
+        // Step 2: Add location block
+        let location = "    location / {\n        try_files $uri $uri/ =404;\n    }";
+        append_to_nginx_file(path_str, location).unwrap();
+        
+        // Step 3: Close server block
+        append_to_nginx_file(path_str, "}").unwrap();
+        
+        // Verify final structure
+        let final_content = fs::read_to_string(&file_path).unwrap();
+        assert!(final_content.contains("server {"));
+        assert!(final_content.contains("listen 80"));
+        assert!(final_content.contains("location /"));
+        assert!(final_content.ends_with("}\n}"));
+
+        cleanup_test_dir(&test_dir);
+    }
+
+    /// Tests concurrent file operations behavior
+    #[test]
+    fn test_concurrent_operations() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        
+        let test_dir = create_test_dir();
+        let file_path = Arc::new(test_dir.join("concurrent.conf"));
+        let barrier = Arc::new(Barrier::new(2));
+        
+        // Create initial file
+        create_nginx_file(file_path.to_str().unwrap(), "server { listen 80; }").unwrap();
+        
+        let path1 = Arc::clone(&file_path);
+        let barrier1 = Arc::clone(&barrier);
+        let handle1 = thread::spawn(move || {
+            barrier1.wait();
+            append_to_nginx_file(path1.to_str().unwrap(), "# Thread 1")
+        });
+        
+        let path2 = Arc::clone(&file_path);
+        let barrier2 = Arc::clone(&barrier);
+        let handle2 = thread::spawn(move || {
+            barrier2.wait();
+            append_to_nginx_file(path2.to_str().unwrap(), "# Thread 2")
+        });
+        
+        let result1 = handle1.join().unwrap();
+        let result2 = handle2.join().unwrap();
+        
+        // Both should succeed
+        assert!(result1.is_ok());
+        assert!(result2.is_ok());
+        
+        // File should contain both appends
+        let content = fs::read_to_string(file_path.as_ref()).unwrap();
+        assert!(content.contains("# Thread 1"));
+        assert!(content.contains("# Thread 2"));
+
+        cleanup_test_dir(&test_dir.to_path_buf());
+    }
+
+    // ===== Nginx Reload Tests =====
+    
+    /// Tests reload_nginx with mock (actual test would require nginx)
+    #[test]
+    #[ignore] // Requires nginx to be installed
+    fn test_reload_nginx_integration() {
+        use tempfile::TempDir;
+        // This test would only work on systems with nginx installed
+        // and proper permissions
+        
+        // Create a test config first
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("test.conf");
+        create_nginx_file(
+            config_path.to_str().unwrap(),
+            "server { listen 8888; server_name test.local; }"
+        ).unwrap();
+        
+        // Try to reload (will fail without proper setup)
+        let result = reload_nginx();
+        
+        // We can't assert success without nginx, but function should return Result
+        match result {
+            Ok(()) => println!("Nginx reloaded successfully"),
+            Err(e) => println!("Expected error without nginx: {}", e),
+        }
     }
 }

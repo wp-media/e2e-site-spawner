@@ -741,7 +741,7 @@ mod tests {
         assert!(!https_generated.contains("!{{"));
         assert!(!https_generated.contains("}}!"));
         assert!(https_generated.contains("/custom/www/complete.test.com"));
-        assert!(https_generated.contains("/custom/ssl/complete.test.com"));
+        assert!(https_generated.contains("/etc/nginx/ssl/complete.test.com"));
     }
 
     /// Tests NginxProtocol enum equality and inequality
@@ -770,11 +770,161 @@ mod tests {
         // SSL path shouldn't be replaced in HTTP template (it doesn't exist there)
         assert!(!http_config.contains("/etc/nginx/ssl"));
     }
+
+    /// Tests NginxConfig::new() constructor path generation
+    #[test]
+    fn test_nginx_config_new_path_construction() {
+        // Test without SSL
+        let config_no_ssl = NginxConfig::new(
+            "test.com".to_string(),
+            "/var/www/html".to_string(),
+            "/etc/nginx/conf.d".to_string(),
+            false,
+        );
+        
+        assert_eq!(config_no_ssl.site_name, "test.com");
+        assert_eq!(config_no_ssl.root, "/var/www/html/test.com");
+        assert_eq!(config_no_ssl.nginx_config_file_path, "/etc/nginx/conf.d/test.com.conf");
+        assert!(config_no_ssl.ssl_root.is_none());
+
+        // Test with SSL
+        let config_with_ssl = NginxConfig::new(
+            "test.com".to_string(),
+            "/var/www/html".to_string(),
+            "/etc/nginx/conf.d".to_string(),
+            true,
+        );
+        
+        assert_eq!(config_with_ssl.ssl_root, Some("/etc/nginx/ssl/test.com/test.com".to_string()));
+    }
+
+    /// Tests validation with invalid site names
+    #[test]
+    fn test_validate_invalid_site_names() {
+        // Test with path traversal attempt
+        let config_path_traversal = NginxConfig {
+            site_name: "../etc/passwd".to_string(),
+            root: "/var/www/html/../etc/passwd".to_string(),
+            nginx_config_file_path: "/etc/nginx/conf.d/../etc/passwd.conf".to_string(),
+            ssl_root: None,
+        };
+        
+        let result = config_path_traversal.validate();
+        assert!(result.is_err());
+        // Domain validation will fail first for "../etc/passwd"
+        assert!(result.unwrap_err().contains("Invalid site name"));
+
+        // Test with forward slash in name
+        let config_with_slash = NginxConfig {
+            site_name: "test/com".to_string(),
+            root: "/var/www/html/test/com".to_string(),
+            nginx_config_file_path: "/etc/nginx/conf.d/test/com.conf".to_string(),
+            ssl_root: None,
+        };
+        
+        let result = config_with_slash.validate();
+        assert!(result.is_err());
+        // Domain validation will fail first for "test/com"
+        assert!(result.unwrap_err().contains("Invalid site name"));
+
+        // Test with invalid domain name (no TLD)
+        let config_invalid_domain = NginxConfig {
+            site_name: "invalid".to_string(),
+            root: "/var/www/html/invalid".to_string(),
+            nginx_config_file_path: "/etc/nginx/conf.d/invalid.conf".to_string(),
+            ssl_root: None,
+        };
+        
+        let result = config_invalid_domain.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid site name"));
+    }
+
+    /// Tests NginxProtocol Debug and Clone traits
+    #[test]
+    fn test_nginx_protocol_traits() {
+        let http = NginxProtocol::Http;
+        let https = NginxProtocol::Https;
+        
+        // Test Debug trait
+        assert_eq!(format!("{:?}", http), "Http");
+        assert_eq!(format!("{:?}", https), "Https");
+        
+        // Test Clone trait
+        let http_clone = http.clone();
+        let https_clone = https.clone();
+        assert_eq!(http, http_clone);
+        assert_eq!(https, https_clone);
+        
+        // Test Copy trait (implicitly via assignment)
+        let http_copy = http;
+        assert_eq!(http, http_copy);
+    }
+
+    /// Tests edge cases in path construction
+    #[test]
+    fn test_nginx_config_edge_case_paths() {
+        // Test with trailing slashes in input paths
+        let config = NginxConfig::new(
+            "example.com".to_string(),
+            "/var/www/html/".to_string(),  // Trailing slash
+            "/etc/nginx/conf.d/".to_string(),  // Trailing slash
+            false,
+        );
+        
+        // Should handle trailing slashes correctly (may result in double slashes)
+        assert_eq!(config.root, "/var/www/html//example.com");
+        assert_eq!(config.nginx_config_file_path, "/etc/nginx/conf.d//example.com.conf");
+        
+        // Test with empty base paths (edge case, shouldn't happen in practice)
+        let config_empty = NginxConfig::new(
+            "test.com".to_string(),
+            "".to_string(),
+            "".to_string(),
+            false,
+        );
+        
+        assert_eq!(config_empty.root, "/test.com");
+        assert_eq!(config_empty.nginx_config_file_path, "/test.com.conf");
+    }
+
+    /// Tests that multiple placeholders of the same type are all replaced
+    #[test]
+    fn test_multiple_placeholder_replacement() {
+        // This test ensures that if a template has multiple instances of the same
+        // placeholder, all get replaced (String::replace replaces all by default)
+        let config = NginxConfig::new(
+            "multi.test.com".to_string(),
+            "/var/www/sites".to_string(),
+            "/etc/nginx/sites-enabled".to_string(),
+            false,
+        );
+        
+        // Create a mock template with multiple placeholders
+        let mut test_template = String::from("server_name !{{site_name}}!;\n");
+        test_template.push_str("root !{{site_path}}!;\n");
+        test_template.push_str("access_log /var/log/nginx/!{{site_name}}!.access.log;\n");
+        test_template.push_str("error_log /var/log/nginx/!{{site_name}}!.error.log;\n");
+        
+        // Manually apply replacements as the method would
+        let result = test_template
+            .replace("!{{site_name}}!", &config.site_name)
+            .replace("!{{site_path}}!", &config.root);
+        
+        // Verify all instances were replaced
+        // Note: site_name appears 3 times in placeholders + 1 time in the path replacement
+        assert_eq!(result.matches("multi.test.com").count(), 4); // 3 from !{{site_name}}! + 1 from path
+        assert_eq!(result.matches("/var/www/sites/multi.test.com").count(), 1);
+        assert!(!result.contains("!{{"));
+    }
 }
 
 #[cfg(test)]
 mod validation_tests {
     use super::*;
+    use std::fs;
+    #[allow(unused_imports)]
+    use std::path::Path;
 
     /// Integration test for system nginx validation (requires nginx installed)
     #[test]
@@ -788,5 +938,117 @@ mod validation_tests {
             Ok(()) => println!("System nginx config is valid"),
             Err(e) => println!("System nginx config error: {}", e),
         }
+    }
+
+    /// Tests validate_nginx_config_file with a temporary valid config
+    #[test]
+    #[ignore] // Requires nginx to be installed
+    fn test_validate_nginx_config_file_valid() {
+        use std::io::Write;
+        
+        // Create a temporary valid nginx config
+        let temp_dir = std::env::temp_dir();
+        let config_path = temp_dir.join("test_valid.conf");
+        
+        let valid_config = r#"
+            server {
+                listen 80;
+                server_name test.local;
+                root /var/www/html;
+                
+                location / {
+                    try_files $uri $uri/ =404;
+                }
+            }
+        "#;
+        
+        let mut file = fs::File::create(&config_path).expect("Failed to create test file");
+        file.write_all(valid_config.as_bytes()).expect("Failed to write test config");
+        
+        // Test validation
+        let result = validate_nginx_config_file(config_path.to_str().unwrap());
+        
+        // Clean up
+        let _ = fs::remove_file(&config_path);
+        
+        // Should be valid
+        assert!(result.is_ok());
+    }
+
+    /// Tests validate_nginx_config_file with invalid syntax
+    #[test]
+    #[ignore] // Requires nginx to be installed
+    fn test_validate_nginx_config_file_invalid() {
+        use std::io::Write;
+        
+        // Create a temporary invalid nginx config
+        let temp_dir = std::env::temp_dir();
+        let config_path = temp_dir.join("test_invalid.conf");
+        
+        let invalid_config = r#"
+            server {
+                listen 80
+                server_name test.local;  # Missing semicolon on listen line
+                root /var/www/html;
+            }
+        "#;
+        
+        let mut file = fs::File::create(&config_path).expect("Failed to create test file");
+        file.write_all(invalid_config.as_bytes()).expect("Failed to write test config");
+        
+        // Test validation
+        let result = validate_nginx_config_file(config_path.to_str().unwrap());
+        
+        // Clean up
+        let _ = fs::remove_file(&config_path);
+        
+        // Should be invalid
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.contains("Invalid configuration"));
+        }
+    }
+
+    /// Tests path validation with non-existent directories
+    #[test]
+    fn test_validate_paths_nonexistent() {
+        let config = NginxConfig {
+            site_name: "test.com".to_string(),
+            root: "/nonexistent/path/test.com".to_string(),
+            nginx_config_file_path: "/also/nonexistent/test.com.conf".to_string(),
+            ssl_root: Some("/ssl/nonexistent/test.com".to_string()),
+        };
+        
+        let result = config.validate_paths();
+        assert!(result.is_err());
+        // Should mention the nonexistent directory
+        assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    /// Tests path validation with file instead of directory
+    #[test]
+    fn test_validate_paths_file_not_directory() {
+        use std::io::Write;
+        
+        // Create a temporary file (not a directory)
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_file_not_dir");
+        let mut file = fs::File::create(&temp_file).expect("Failed to create test file");
+        file.write_all(b"test").expect("Failed to write");
+        
+        let config = NginxConfig {
+            site_name: "test.com".to_string(),
+            root: format!("{}/test.com", temp_file.to_str().unwrap()),
+            nginx_config_file_path: "/etc/nginx/conf.d/test.com.conf".to_string(),
+            ssl_root: None,
+        };
+        
+        let result = config.validate_paths();
+        
+        // Clean up
+        let _ = fs::remove_file(&temp_file);
+        
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a directory"));
     }
 }

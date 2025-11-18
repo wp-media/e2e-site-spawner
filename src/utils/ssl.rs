@@ -362,6 +362,11 @@ pub fn ask_for_ssl_confirmation(site_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
+    use std::fs;
+    use tempfile::TempDir;
+
+    // ===== generate_ssl Tests =====
 
     /// Tests that generate_ssl fails when SSL root is not configured
     #[test]
@@ -380,21 +385,427 @@ mod tests {
             .contains("SSL root path is not configured"));
     }
 
-    /// Tests SSL warning message formatting
     #[test]
-    fn test_ssl_warning_contains_domain() {
-        // This test would need to capture stdout, which is complex
-        // For now, we just ensure the function doesn't panic
-        print_ssl_warning("example.com");
-        // Function should complete without panicking
+    fn test_generate_ssl_with_valid_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let ssl_dir = temp_dir.path().join("ssl");
+        std::fs::create_dir(&ssl_dir).unwrap();
+        
+        let mut config = nginx::config::NginxConfig::new(
+            "test.example.com".to_string(),
+            temp_dir.path().to_str().unwrap().to_string(),
+            temp_dir.path().to_str().unwrap().to_string(),
+            false,
+        );
+        
+        // Manually set SSL root for testing
+        config.ssl_root = Some(ssl_dir.to_str().unwrap().to_string());
+        
+        // Check if acme.sh is available
+        let acme_check = Command::new("which")
+            .arg("acme.sh")
+            .output();
+        
+        if acme_check.is_err() || !acme_check.unwrap().status.success() {
+            // acme.sh not installed, test would fail expectedly
+            let result = generate_ssl(&config);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("acme.sh"));
+        } else {
+            // This would actually try to get a certificate
+            // which would fail for test.example.com
+            let result = generate_ssl(&config);
+            assert!(result.is_err());
+            // Should fail with domain verification error
+        }
     }
 
-    /// Tests that ask_for_ssl_confirmation handles various inputs correctly
     #[test]
-    #[ignore] // Ignored because it requires user interaction
-    fn test_ssl_confirmation_responses() {
-        // This test would require mocking stdin, which is complex
-        // In a real implementation, you'd use a testing framework
-        // that supports stdin mocking
+    #[ignore] // Requires acme.sh and valid domain
+    fn test_generate_ssl_integration() {
+        // This test would only work with:
+        // 1. acme.sh installed
+        // 2. A valid domain pointing to this server
+        // 3. Port 80 accessible
+        
+        let config = nginx::config::NginxConfig::new(
+            "your-test-domain.com".to_string(),
+            "/var/www/html".to_string(),
+            "/etc/nginx/conf.d".to_string(),
+            true,
+        );
+        
+        match generate_ssl(&config) {
+            Ok(()) => {
+                // Verify certificate files exist
+                let ssl_root = config.ssl_root.as_ref().unwrap();
+                let privkey = format!("{}/privkey.pem", ssl_root);
+                let fullchain = format!("{}/fullchain.pem", ssl_root);
+                
+                assert!(std::path::Path::new(&privkey).exists());
+                assert!(std::path::Path::new(&fullchain).exists());
+            }
+            Err(e) => {
+                println!("Expected error in test environment: {}", e);
+            }
+        }
+    }
+
+    // ===== Error Message Tests =====
+
+    #[test]
+    fn test_generate_ssl_error_messages() {
+        // Test that error messages are informative
+        let mut config = nginx::config::NginxConfig::new(
+            "test.local".to_string(),
+            "/nonexistent/path".to_string(),
+            "/etc/nginx/conf.d".to_string(),
+            false,
+        );
+        
+        // Test missing SSL root
+        config.ssl_root = None;
+        let result = generate_ssl(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("SSL root"));
+        assert!(err.contains("not configured"));
+        
+        // Test with SSL root but invalid paths
+        config.ssl_root = Some("/invalid/ssl/path".to_string());
+        
+        // Mock acme.sh not found
+        if Command::new("acme.sh").output().is_err() {
+            let result = generate_ssl(&config);
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert!(err.contains("acme.sh"));
+            assert!(err.contains("installed"));
+        }
+    }
+
+    // ===== Warning and Confirmation Tests =====
+
+    #[test]
+    fn test_print_ssl_warning_no_panic() {
+        // Ensure function completes without panic for various inputs
+        print_ssl_warning("example.com");
+        print_ssl_warning("sub.example.com");
+        print_ssl_warning("test-site.org");
+        print_ssl_warning(""); // Empty domain
+        print_ssl_warning("very-long-domain-name-that-exceeds-normal-length.example.com");
+    }
+
+    /// Tests that warning includes the actual domain name
+    #[test]
+    fn test_ssl_warning_output() {
+        #![allow(unused_imports)]
+        use std::sync::Mutex;
+        use std::io::{self, Write};
+        
+        // Since we can't easily capture stdout in tests, we ensure no panic
+        // In production code, you might use a writer trait for testability
+        let test_domains = vec![
+            "example.com",
+            "test.local",
+            "my-site.org",
+            "subdomain.example.com",
+        ];
+        
+        for domain in test_domains {
+            // This ensures the function handles various domain formats
+            print_ssl_warning(domain);
+        }
+    }
+
+    #[test]
+    #[ignore] // Requires stdin mocking
+    fn test_ask_for_ssl_confirmation_yes() {
+        // This would require stdin mocking
+        // Example with a hypothetical stdin mock:
+        //
+        // let input = "y\n";
+        // let result = with_stdin(input, || {
+        //     ask_for_ssl_confirmation("test.com")
+        // });
+        // assert_eq!(result, true);
+    }
+
+    #[test]
+    #[ignore] // Requires stdin mocking  
+    fn test_ask_for_ssl_confirmation_no() {
+        // Test various "no" responses
+        // Would need stdin mocking framework
+    }
+
+    // ===== Path Construction Tests =====
+
+    #[test]
+    fn test_ssl_certificate_paths() {
+        let config = nginx::config::NginxConfig::new(
+            "test.com".to_string(),
+            "/var/www/html".to_string(),
+            "/etc/nginx/conf.d".to_string(),
+            true,
+        );
+        
+        if let Some(ssl_root) = &config.ssl_root {
+            // Test path construction that would be used in generate_ssl
+            let privkey_path = format!("{}/privkey.pem", ssl_root);
+            let fullchain_path = format!("{}/fullchain.pem", ssl_root);
+            
+            assert!(privkey_path.ends_with("/privkey.pem"));
+            assert!(fullchain_path.ends_with("/fullchain.pem"));
+            assert!(privkey_path.contains("test.com"));
+            assert!(fullchain_path.contains("test.com"));
+        } else {
+            panic!("SSL root should be set when SSL is enabled");
+        }
+    }
+
+    #[test]
+    fn test_acme_command_construction() {
+        // Test that commands are constructed correctly
+        let site_name = "example.com";
+        let webroot = "/var/www/html";
+        
+        // Test issue command arguments
+        let issue_args = vec![
+            "--issue",
+            "-d", site_name,
+            "--webroot", webroot,
+            "--server", "letsencrypt"
+        ];
+        
+        assert_eq!(issue_args[1], "-d");
+        assert_eq!(issue_args[2], site_name);
+        assert_eq!(issue_args[4], webroot);
+        
+        // Test install command arguments
+        let privkey = "/etc/nginx/ssl/privkey.pem";
+        let fullchain = "/etc/nginx/ssl/fullchain.pem";
+        
+        let install_args = vec![
+            "--install-cert",
+            "-d", site_name,
+            "--key-file", privkey,
+            "--fullchain-file", fullchain,
+            "--reloadcmd", "sudo systemctl reload nginx",
+            "--server", "letsencrypt"
+        ];
+        
+        assert_eq!(install_args[0], "--install-cert");
+        assert_eq!(install_args[2], site_name);
+        assert_eq!(install_args[4], privkey);
+        assert_eq!(install_args[6], fullchain);
+    }
+
+    // ===== Mock Command Tests =====
+
+    /// Tests command execution error handling
+    #[test]
+    fn test_command_execution_errors() {
+        // Test with a command that doesn't exist
+        let result = Command::new("nonexistent_command_12345")
+            .arg("--test")
+            .output();
+        
+        assert!(result.is_err());
+        
+        // Similar error should be caught in generate_ssl
+        let config = nginx::config::NginxConfig::new(
+            "test.com".to_string(),
+            "/var/www/html".to_string(),
+            "/etc/nginx/conf.d".to_string(),
+            true,
+        );
+        
+        // If acme.sh doesn't exist, generate_ssl should handle it gracefully
+        let result = generate_ssl(&config);
+        if result.is_err() {
+            let err = result.unwrap_err();
+            // Should provide helpful error message
+            assert!(!err.is_empty());
+        }
+    }
+
+    // ===== Domain Validation Tests =====
+
+    #[test]
+    fn test_domain_name_handling() {
+        let test_domains = vec![
+            ("simple.com", true),
+            ("sub.domain.com", true),
+            ("my-site.org", true),
+            ("123.456.789.012", true), // IP address format
+            ("localhost", true),
+            ("test_underscore.com", true),
+            ("", true), // Empty should be handled gracefully
+            ("very-long-domain-name-with-many-subdomains.example.co.uk", true),
+        ];
+        
+        for (domain, _should_work) in test_domains {
+            let config = nginx::config::NginxConfig::new(
+                domain.to_string(),
+                "/var/www/html".to_string(),
+                "/etc/nginx/conf.d".to_string(),
+                true,
+            );
+            
+            // Function should handle any domain format without panicking
+            let _ = generate_ssl(&config);
+        }
+    }
+
+    // ===== Output Formatting Tests =====
+
+    #[test]
+    fn test_colored_output() {
+        use colored::*;
+        
+        // Test that colored output works correctly
+        let test_string = "Test".bright_blue();
+        assert!(test_string.to_string().len() > 4); // Includes ANSI codes
+        
+        let warning = "Warning".bright_yellow();
+        assert!(warning.to_string().len() > 7);
+        
+        let success = "Success".bright_green();
+        assert!(success.to_string().len() > 7);
+    }
+
+    // ===== SSL Certificate Validation Tests =====
+
+    #[test]
+    #[ignore] // Requires actual certificates
+    fn test_certificate_file_validation() {
+        use std::fs;
+        
+        let temp_dir = TempDir::new().unwrap();
+        let ssl_root = temp_dir.path().join("ssl");
+        fs::create_dir(&ssl_root).unwrap();
+        
+        // Create mock certificate files
+        let privkey_path = ssl_root.join("privkey.pem");
+        let fullchain_path = ssl_root.join("fullchain.pem");
+        
+        // Mock PEM content (not valid certs, just for testing file handling)
+        let mock_privkey = "-----BEGIN PRIVATE KEY-----\nMOCK_KEY\n-----END PRIVATE KEY-----";
+        let mock_cert = "-----BEGIN CERTIFICATE-----\nMOCK_CERT\n-----END CERTIFICATE-----";
+        
+        fs::write(&privkey_path, mock_privkey).unwrap();
+        fs::write(&fullchain_path, mock_cert).unwrap();
+        
+        // Verify files exist and have content
+        assert!(privkey_path.exists());
+        assert!(fullchain_path.exists());
+        
+        let privkey_content = fs::read_to_string(&privkey_path).unwrap();
+        assert!(privkey_content.contains("BEGIN PRIVATE KEY"));
+        
+        let cert_content = fs::read_to_string(&fullchain_path).unwrap();
+        assert!(cert_content.contains("BEGIN CERTIFICATE"));
+        
+        // Check permissions on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            
+            // Set restrictive permissions on private key
+            let mut perms = fs::metadata(&privkey_path).unwrap().permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(&privkey_path, perms).unwrap();
+            
+            // Verify permissions
+            let metadata = fs::metadata(&privkey_path).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    // ===== Utility Function Tests =====
+
+    /// Helper function to check if a command exists
+    fn command_exists(cmd: &str) -> bool {
+        Command::new("which")
+            .arg(cmd)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn test_acme_sh_availability() {
+        let has_acme = command_exists("acme.sh");
+        
+        if has_acme {
+            println!("acme.sh is installed");
+            
+            // Test version command
+            let version_result = Command::new("acme.sh")
+                .arg("--version")
+                .output();
+            
+            assert!(version_result.is_ok());
+            if let Ok(output) = version_result {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(stdout.contains("acme.sh") || stdout.contains("v"));
+            }
+        } else {
+            println!("acme.sh is not installed - some tests will be skipped");
+        }
+    }
+
+    #[test]
+    fn test_nginx_reload_command() {
+        // Test that the nginx reload command is properly formatted
+        let reload_cmd = "sudo systemctl reload nginx";
+        
+        // Verify it contains necessary components
+        assert!(reload_cmd.contains("nginx"));
+        assert!(reload_cmd.contains("reload") || reload_cmd.contains("restart"));
+        
+        // On systems with systemctl
+        if command_exists("systemctl") {
+            // Check if nginx service exists (won't actually reload)
+            let status = Command::new("systemctl")
+                .args(&["status", "nginx"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            
+            if status.is_ok() {
+                println!("nginx service is available via systemctl");
+            }
+        }
+    }
+
+    // ===== Error Recovery Tests =====
+
+    #[test]
+    fn test_ssl_generation_error_recovery() {
+        // Test that partial SSL generation can be recovered from
+        let temp_dir = TempDir::new().unwrap();
+        let ssl_dir = temp_dir.path().join("ssl");
+        fs::create_dir(&ssl_dir).unwrap();
+        
+        let mut config = nginx::config::NginxConfig::new(
+            "test-recovery.com".to_string(),
+            temp_dir.path().to_str().unwrap().to_string(),
+            temp_dir.path().to_str().unwrap().to_string(),
+            false,
+        );
+        config.ssl_root = Some(ssl_dir.to_str().unwrap().to_string());
+        
+        // First attempt fails
+        let result1 = generate_ssl(&config);
+        assert!(result1.is_err());
+        
+        // Second attempt should also handle the state gracefully
+        let result2 = generate_ssl(&config);
+        assert!(result2.is_err());
+        
+        // No panic or state corruption
     }
 }

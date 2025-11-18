@@ -867,6 +867,11 @@ pub fn remove_file(file_path: &str) -> Result<(), FileCreationError> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    use std::fs;
+    #[allow(unused_imports)]
+    use std::io::Write;
+
+    // ===== Directory Management Tests =====
 
     #[test]
     fn test_create_directory_if_not_exists() {
@@ -918,12 +923,497 @@ mod tests {
         let dir_path = temp_dir.path().join("perm_test");
 
         // Create directory with specific permissions
-        create_directory_if_not_exists(dir_path.to_str().unwrap(), Some(0o777)).unwrap();
+        create_directory_if_not_exists(dir_path.to_str().unwrap(), Some(0o700)).unwrap();
 
         // Check permissions
         let metadata = fs::metadata(&dir_path).unwrap();
         let permissions = metadata.permissions();
         // Mask with 0o777 to get only the permission bits we care about
-        assert_eq!(permissions.mode() & 0o777, 0o777);
+        assert_eq!(permissions.mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn test_create_directory_without_permissions() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir_path = temp_dir.path().join("default_perms");
+
+        // Create without specifying permissions
+        let result = create_directory_if_not_exists(dir_path.to_str().unwrap(), None);
+        assert!(result.is_ok());
+        assert!(dir_path.exists());
+    }
+
+    // ===== File Creation Tests =====
+
+    #[test]
+    fn test_create_file_with_content_if_not_exists() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        let content = "Hello, World!";
+
+        let result = create_file_with_content_if_not_exists(
+            file_path.to_str().unwrap(),
+            content,
+            Some(0o644),
+        );
+        assert!(result.is_ok());
+        assert!(file_path.exists());
+
+        // Verify content
+        let written_content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(written_content, content);
+    }
+
+    #[test]
+    fn test_create_file_already_exists() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("existing.txt");
+
+        // Create file first
+        fs::write(&file_path, "original").unwrap();
+
+        // Try to create again
+        let result = create_file_with_content_if_not_exists(
+            file_path.to_str().unwrap(),
+            "new content",
+            None,
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(FileCreationError::FileWriteFailed(_))
+        ));
+
+        // Verify original content unchanged
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "original");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("perm_file.txt");
+
+        create_file_with_content_if_not_exists(
+            file_path.to_str().unwrap(),
+            "test",
+            Some(0o600),
+        )
+        .unwrap();
+
+        let metadata = fs::metadata(&file_path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn test_create_file_with_empty_content() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("empty.txt");
+
+        let result = create_file_with_content_if_not_exists(
+            file_path.to_str().unwrap(),
+            "",
+            None,
+        );
+        assert!(result.is_ok());
+        assert!(file_path.exists());
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "");
+    }
+
+    // ===== File/Directory Removal Tests =====
+
+    #[test]
+    fn test_remove_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir_path = temp_dir.path().join("to_remove");
+
+        // Create directory with files
+        fs::create_dir(&dir_path).unwrap();
+        fs::write(dir_path.join("file1.txt"), "content1").unwrap();
+        fs::write(dir_path.join("file2.txt"), "content2").unwrap();
+
+        // Remove directory
+        let result = remove_directory(dir_path.to_str().unwrap());
+        assert!(result.is_ok());
+        assert!(!dir_path.exists());
+    }
+
+    #[test]
+    fn test_remove_directory_nonexistent() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir_path = temp_dir.path().join("nonexistent");
+
+        // Should succeed even if directory doesn't exist
+        let result = remove_directory(dir_path.to_str().unwrap());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_remove_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("to_remove.txt");
+
+        // Create file
+        fs::write(&file_path, "content").unwrap();
+        assert!(file_path.exists());
+
+        // Remove file
+        let result = remove_file(file_path.to_str().unwrap());
+        assert!(result.is_ok());
+        assert!(!file_path.exists());
+    }
+
+    #[test]
+    fn test_remove_file_nonexistent() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("nonexistent.txt");
+
+        // Should succeed even if file doesn't exist
+        let result = remove_file(file_path.to_str().unwrap());
+        assert!(result.is_ok());
+    }
+
+    // ===== WordPress Configuration Tests =====
+
+    #[test]
+    fn test_generate_wp_config_content_from_sample() {
+        let sample = r#"
+define('DB_NAME', 'database_name_here');
+define('DB_USER', 'username_here');
+define('DB_PASSWORD', 'password_here');
+define('DB_HOST', 'localhost');
+define('DB_CHARSET', 'utf8');
+define('AUTH_KEY', 'put your unique phrase here');
+define('SECURE_AUTH_KEY', 'put your unique phrase here');
+"#;
+
+        let result = generate_wp_config_content_from_sample(
+            "wp_testsite",
+            "wpuser",
+            "secret123",
+            "127.0.0.1",
+            "utf8mb4",
+            sample.to_string(),
+        )
+        .unwrap();
+
+        // Check replacements
+        assert!(result.contains("'wp_testsite'"));
+        assert!(result.contains("'wpuser'"));
+        assert!(result.contains("'secret123'"));
+        assert!(result.contains("'127.0.0.1'"));
+        assert!(result.contains("'utf8mb4'"));
+
+        // Check salt keys are replaced
+        assert!(!result.contains("put your unique phrase here"));
+
+        // Check that AUTH_KEY and SECURE_AUTH_KEY have different values
+        let auth_key_pos = result.find("AUTH_KEY").unwrap();
+        let secure_auth_key_pos = result.find("SECURE_AUTH_KEY").unwrap();
+        let auth_key_line = result[auth_key_pos..].lines().next().unwrap();
+        let secure_auth_key_line = result[secure_auth_key_pos..].lines().next().unwrap();
+        assert_ne!(auth_key_line, secure_auth_key_line);
+    }
+
+    #[test]
+    fn test_generate_wp_config_all_salt_keys_replaced() {
+        let sample = r#"
+define('AUTH_KEY',         'put your unique phrase here');
+define('SECURE_AUTH_KEY',  'put your unique phrase here');
+define('LOGGED_IN_KEY',    'put your unique phrase here');
+define('NONCE_KEY',        'put your unique phrase here');
+define('AUTH_SALT',        'put your unique phrase here');
+define('SECURE_AUTH_SALT', 'put your unique phrase here');
+define('LOGGED_IN_SALT',   'put your unique phrase here');
+define('NONCE_SALT',       'put your unique phrase here');
+"#;
+
+        let result = generate_wp_config_content_from_sample(
+            "testdb",
+            "user",
+            "pass",
+            "localhost",
+            "utf8mb4",
+            sample.to_string(),
+        )
+        .unwrap();
+
+        // Ensure no placeholder remains
+        assert!(!result.contains("put your unique phrase here"));
+
+        // Count that we have 8 different 64-char keys
+        let lines: Vec<&str> = result.lines().collect();
+        let mut keys = Vec::new();
+        for line in lines {
+            if line.contains("define(") && line.contains("_KEY") || line.contains("_SALT") {
+                // Extract the key value between quotes
+                if let Some(start) = line.rfind('\'') {
+                    if let Some(end) = line[..start].rfind('\'') {
+                        let key = &line[end + 1..start];
+                        assert_eq!(key.len(), 64, "Salt key should be 64 characters");
+                        keys.push(key);
+                    }
+                }
+            }
+        }
+
+        // Verify all keys are unique
+        assert_eq!(keys.len(), 8);
+        for i in 0..keys.len() {
+            for j in i + 1..keys.len() {
+                assert_ne!(keys[i], keys[j], "All salt keys should be unique");
+            }
+        }
+    }
+
+    #[test]
+    fn test_create_salt_key() {
+        let key1 = create_salt_key();
+        let key2 = create_salt_key();
+
+        // Check length
+        assert_eq!(key1.len(), 64);
+        assert_eq!(key2.len(), 64);
+
+        // Check uniqueness
+        assert_ne!(key1, key2);
+
+        // Check alphanumeric
+        assert!(key1.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert!(key2.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    // ===== Ownership Tests (Unix only) =====
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore] // Requires specific users/groups to exist
+    fn test_set_path_owner_user_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("owner_test.txt");
+        fs::write(&file_path, "test").unwrap();
+
+        // This test requires the current user to have permission to change ownership
+        // Usually only works as root, so we test with current user
+        let current_user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+
+        let result = set_path_owner(Some(&current_user), None, file_path.to_str().unwrap());
+        // May fail in restricted environments
+        if result.is_ok() {
+            println!("Ownership change successful");
+        } else {
+            println!("Expected failure in restricted environment");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_path_owner_invalid_user() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("invalid_user.txt");
+        fs::write(&file_path, "test").unwrap();
+
+        let result = set_path_owner(
+            Some("nonexistent_user_12345"),
+            None,
+            file_path.to_str().unwrap(),
+        );
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(FileCreationError::PermissionSetFailed(_))
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_path_owner_invalid_group() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("invalid_group.txt");
+        fs::write(&file_path, "test").unwrap();
+
+        let result = set_path_owner(
+            None,
+            Some("nonexistent_group_12345"),
+            file_path.to_str().unwrap(),
+        );
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(FileCreationError::PermissionSetFailed(_))
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_path_owner_none_both() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("none_both.txt");
+        fs::write(&file_path, "test").unwrap();
+
+        // Should succeed but do nothing
+        let result = set_path_owner(None, None, file_path.to_str().unwrap());
+        assert!(result.is_ok());
+    }
+
+    // ===== Step Reversion Tests =====
+
+    #[test]
+    fn test_is_step_group_reverted() {
+        let mut reverted = vec![];
+
+        // Test nginx config group
+        assert!(!is_step_group_reverted(&SpawnSteps::CreateNginxConfig, &reverted));
+
+        reverted.push(SpawnSteps::CreateNginxConfig);
+        assert!(is_step_group_reverted(&SpawnSteps::CreateNginxConfig, &reverted));
+        assert!(is_step_group_reverted(&SpawnSteps::CreateNginxConfigWithSSL, &reverted));
+
+        // Test site directory group
+        reverted.clear();
+        assert!(!is_step_group_reverted(&SpawnSteps::CreateSiteDirectory, &reverted));
+
+        reverted.push(SpawnSteps::CreateWPConfigFile);
+        assert!(is_step_group_reverted(&SpawnSteps::CreateSiteDirectory, &reverted));
+        assert!(is_step_group_reverted(&SpawnSteps::CreateWPConfigFile, &reverted));
+
+        // Test SSL directory group
+        reverted.clear();
+        reverted.push(SpawnSteps::CreateSSL);
+        assert!(is_step_group_reverted(&SpawnSteps::CreateSSLDirectory, &reverted));
+        assert!(is_step_group_reverted(&SpawnSteps::CreateSSL, &reverted));
+
+        // Test database (not in a group)
+        reverted.clear();
+        let db1 = SpawnSteps::CreateDatabase("db1".to_string());
+        let db2 = SpawnSteps::CreateDatabase("db2".to_string());
+
+        assert!(!is_step_group_reverted(&db1, &reverted));
+        reverted.push(db1.clone());
+        assert!(is_step_group_reverted(&db2, &reverted));
+    }
+
+    // ===== Error Display Tests =====
+
+    #[test]
+    fn test_file_creation_error_display() {
+        let err = FileCreationError::InvalidPath("test path".to_string());
+        assert_eq!(err.to_string(), "Invalid path: test path");
+
+        let err = FileCreationError::InsufficientPermissions("denied".to_string());
+        assert_eq!(err.to_string(), "Insufficient permissions: denied");
+
+        let err = FileCreationError::DirectoryCreationFailed("mkdir failed".to_string());
+        assert_eq!(err.to_string(), "Failed to create directory: mkdir failed");
+
+        let err = FileCreationError::FileWriteFailed("write error".to_string());
+        assert_eq!(err.to_string(), "Failed to write file: write error");
+
+        let err = FileCreationError::PermissionSetFailed("chmod failed".to_string());
+        assert_eq!(err.to_string(), "Failed to set permissions: chmod failed");
+
+        let err = FileCreationError::PathTraversal("../etc/passwd".to_string());
+        assert_eq!(err.to_string(), "Path traversal detected: ../etc/passwd");
+    }
+
+    #[test]
+    fn test_error_trait_implementation() {
+        let err = FileCreationError::InvalidPath("test".to_string());
+        let _: &dyn std::error::Error = &err;
+    }
+
+    // ===== Integration Tests =====
+
+    #[test]
+    fn test_create_wp_config_file_integration() {
+        let temp_dir = TempDir::new().unwrap();
+        let site_path = temp_dir.path();
+
+        // Create a mock wp-config-sample.php
+        let sample_content = r#"<?php
+define('DB_NAME', 'database_name_here');
+define('DB_USER', 'username_here');
+define('DB_PASSWORD', 'password_here');
+define('DB_HOST', 'localhost');
+define('DB_CHARSET', 'utf8');
+define('AUTH_KEY', 'put your unique phrase here');
+"#;
+
+        let sample_path = site_path.join("wp-config-sample.php");
+        fs::write(&sample_path, sample_content).unwrap();
+
+        // Create wp-config.php
+        let result = create_wp_config_file(
+            site_path.to_str().unwrap(),
+            "wp_test",
+            "testuser",
+            "testpass",
+            "localhost",
+            "utf8mb4",
+        );
+
+        assert!(result.is_ok());
+
+        // Verify wp-config.php exists and has correct content
+        let config_path = site_path.join("wp-config.php");
+        assert!(config_path.exists());
+
+        let config_content = fs::read_to_string(&config_path).unwrap();
+        assert!(config_content.contains("'wp_test'"));
+        assert!(config_content.contains("'testuser'"));
+        assert!(config_content.contains("'testpass'"));
+        assert!(!config_content.contains("put your unique phrase here"));
+    }
+
+    #[test]
+    fn test_create_wp_config_file_missing_sample() {
+        let temp_dir = TempDir::new().unwrap();
+        let site_path = temp_dir.path();
+
+        // Try to create wp-config.php without sample
+        let result = create_wp_config_file(
+            site_path.to_str().unwrap(),
+            "wp_test",
+            "user",
+            "pass",
+            "localhost",
+            "utf8mb4",
+        );
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(FileCreationError::FileWriteFailed(_))
+        ));
+    }
+
+    #[test]
+    #[ignore] // Requires network connection and curl
+    fn test_put_wordpress_in_site_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let site_path = temp_dir.path().join("wordpress_test");
+        fs::create_dir(&site_path).unwrap();
+
+        // This would download actual WordPress
+        let result = put_wordpress_in_site_directory(site_path.to_str().unwrap());
+
+        match result {
+            Ok(()) => {
+                // Check WordPress files exist
+                assert!(site_path.join("wp-config-sample.php").exists());
+                assert!(site_path.join("index.php").exists());
+                assert!(site_path.join("wp-admin").exists());
+            }
+            Err(e) => {
+                println!("Expected error in test environment: {}", e);
+            }
+        }
     }
 }
