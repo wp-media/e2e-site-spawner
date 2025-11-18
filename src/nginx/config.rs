@@ -1,42 +1,138 @@
 use crate::constants::{NGINX_HTTP_TEMPLATE, NGINX_HTTPS_TEMPLATE, SITES_SSL_PATH};
-/// This module defines the structure and functions for managing Nginx configuration files.
+/// Nginx configuration module for the e2e-site-spawner.
 ///
-/// The primary responsibilities include:
-/// - Loading and parsing Nginx configuration files.
-/// - Validating configuration settings.
-/// - Generating new configuration files for sites.
+/// This module provides functionality for managing Nginx configuration files,
+/// including creation, validation, and template-based generation of site configurations.
 ///
-/// Future implementation will include functions to read, write, and validate Nginx configurations.
+/// # Overview
+///
+/// The module handles:
+/// - Loading and parsing Nginx configuration files
+/// - Validating configuration settings and syntax
+/// - Generating new configuration files from templates
+/// - Supporting both HTTP and HTTPS protocols
+/// - Path validation and security checks
+///
+/// # Examples
+///
+/// ```
+/// use nginx::config::{NginxConfig, NginxProtocol};
+///
+/// // Create a new site configuration
+/// let config = NginxConfig::new(
+///     "example.com".to_string(),
+///     "/var/www/sites".to_string(),
+///     "/etc/nginx/conf.d".to_string(),
+///     true, // Enable SSL
+/// );
+///
+/// // Validate the configuration
+/// config.validate()?;
+///
+/// // Generate HTTP and HTTPS configurations
+/// let http_config = config.generate_config(NginxProtocol::Http);
+/// let https_config = config.generate_config(NginxProtocol::Https);
+/// ```
 use std::path::Path;
 use std::process::Command;
 
-/// Represents the protocol type for the Nginx configuration
+/// Represents the protocol type for Nginx configuration.
+///
+/// This enum determines which configuration template will be used
+/// and what port bindings and SSL settings will be applied.
+///
+/// # Examples
+///
+/// ```
+/// let protocol = NginxProtocol::Https;
+/// match protocol {
+///     NginxProtocol::Http => println!("Using port 80"),
+///     NginxProtocol::Https => println!("Using port 443 with SSL"),
+/// }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NginxProtocol {
+    /// HTTP protocol - serves content on port 80 without encryption
     Http,
+    /// HTTPS protocol - serves content on port 443 with SSL/TLS encryption
     Https,
 }
 
+/// Represents the complete configuration for an Nginx site.
+///
+/// This struct holds all the necessary information to generate
+/// and manage Nginx configuration files for a specific site.
+///
+/// # Fields
+///
+/// * `site_name` - The domain name of the site (e.g., "example.com")
+/// * `root` - The document root directory where site files are stored
+/// * `nginx_config_file_path` - Full path to the Nginx configuration file
+/// * `ssl_root` - Optional path to SSL certificates directory (only when SSL is enabled)
+///
+/// # Examples
+///
+/// ```
+/// let config = NginxConfig::new(
+///     "blog.example.com".to_string(),
+///     "/var/www/sites".to_string(),
+///     "/etc/nginx/conf.d".to_string(),
+///     true,
+/// );
+/// 
+/// println!("Site: {}", config.site_name);
+/// println!("Root: {}", config.root);
+/// ```
 pub struct NginxConfig {
+    /// The domain name of the site
     pub site_name: String,
+    /// The document root directory for the site
     pub root: String,
+    /// Full path to the Nginx configuration file
     pub nginx_config_file_path: String,
+    /// Optional SSL certificate directory path
     pub ssl_root: Option<String>,
 }
 
 impl NginxConfig {
     /// Creates a new NginxConfig instance with the specified parameters.
     ///
+    /// This constructor automatically constructs the appropriate paths
+    /// based on the provided base paths and site name. If SSL is enabled,
+    /// it also creates the SSL certificate path.
+    ///
     /// # Arguments
     ///
-    /// * `site_name` - The name of the site (domain).
-    /// * `sites_path` - The base path where sites are located.
-    /// * `nginx_config` - The path to the Nginx configuration directory.
-    /// * `ssl_path` - The path to the SSL certificate directory.
+    /// * `site_name` - The domain name of the site (e.g., "example.com")
+    /// * `sites_path` - The base directory where all sites are located (e.g., "/var/www/sites")
+    /// * `nginx_config` - The Nginx configuration directory (e.g., "/etc/nginx/conf.d")
+    /// * `use_ssl` - Whether to enable SSL for this site
     ///
     /// # Returns
     ///
-    /// A new instance of NginxConfig.
+    /// A new instance of `NginxConfig` with all paths properly constructed.
+    ///
+    /// # Path Construction
+    ///
+    /// - Site root: `{sites_path}/{site_name}`
+    /// - Nginx config: `{nginx_config}/{site_name}.conf`
+    /// - SSL root (if enabled): `{SITES_SSL_PATH}/{site_name}/{site_name}`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Create configuration for a site with SSL
+    /// let config = NginxConfig::new(
+    ///     "shop.example.com".to_string(),
+    ///     "/var/www/html".to_string(),
+    ///     "/etc/nginx/sites-enabled".to_string(),
+    ///     true,
+    /// );
+    /// 
+    /// assert_eq!(config.root, "/var/www/html/shop.example.com");
+    /// assert_eq!(config.nginx_config_file_path, "/etc/nginx/sites-enabled/shop.example.com.conf");
+    /// assert!(config.ssl_root.is_some());
+    /// ```
     pub fn new(site_name: String, sites_path: String, nginx_config: String, use_ssl: bool) -> Self {
         let ssl_path = use_ssl.then(|| format!("{}/{}", SITES_SSL_PATH, site_name));
         let nginx_config_file_path = format!("{}/{}.conf", nginx_config, site_name);
@@ -51,12 +147,48 @@ impl NginxConfig {
 
     /// Validates the Nginx configuration settings.
     ///
-    /// This performs both structural validation (paths, names) and
-    /// optionally tests the actual nginx configuration syntax.
+    /// Performs comprehensive validation including:
+    /// - Site name validation (domain name format)
+    /// - Path existence and accessibility checks
+    /// - Security validation (path traversal prevention)
     ///
     /// # Returns
     ///
-    /// A Result indicating success or failure of validation.
+    /// * `Ok(())` - If all validation checks pass
+    /// * `Err(String)` - If any validation fails, with a descriptive error message
+    ///
+    /// # Validation Steps
+    ///
+    /// 1. **Site name validation**: Ensures the domain name is valid
+    /// 2. **Path validation**: Verifies all required directories exist
+    /// 3. **Security checks**: Prevents path traversal attacks
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// - The site name contains invalid characters or format
+    /// - Required directories don't exist or aren't accessible
+    /// - The site name contains path traversal attempts (`..` or `/`)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let config = NginxConfig::new(
+    ///     "valid-site.com".to_string(),
+    ///     "/var/www/sites".to_string(),
+    ///     "/etc/nginx/conf.d".to_string(),
+    ///     false,
+    /// );
+    /// 
+    /// match config.validate() {
+    ///     Ok(()) => println!("Configuration is valid"),
+    ///     Err(e) => eprintln!("Validation failed: {}", e),
+    /// }
+    /// ```
+    ///
+    /// # TODO
+    /// 
+    /// - Aggregate all validation errors to return at once for better UX
     pub fn validate(&self) -> Result<(), String> {
         // TODO: Do all confirmations (if possible) and concatenate errors to return all at once, so, all issues can be fixed at once.
         // 1. Validate site name (domain name validation)
@@ -77,7 +209,30 @@ impl NginxConfig {
         Ok(())
     }
 
-    /// Validates that required paths exist and are accessible
+    /// Validates that all required paths exist and are accessible.
+    ///
+    /// This internal method checks the existence and accessibility of:
+    /// - Parent directory of the site root
+    /// - Nginx configuration directory
+    /// - SSL certificate directory (if SSL is enabled)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If all paths are valid and accessible
+    /// * `Err(String)` - If any path is invalid, with details about which path failed
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Sites directory doesn't exist
+    /// - Sites path exists but isn't a directory
+    /// - Nginx configuration directory doesn't exist
+    /// - SSL directory doesn't exist (when SSL is enabled)
+    ///
+    /// # Note
+    ///
+    /// This method checks parent directories, not the final paths themselves,
+    /// as those will be created during site setup.
     fn validate_paths(&self) -> Result<(), String> {
         // Check if root directory parent exists
         if let Some(parent) = Path::new(&self.root).parent() {
@@ -115,41 +270,54 @@ impl NginxConfig {
     ///
     /// This function takes a template (HTTP or HTTPS) based on the specified protocol
     /// and replaces placeholder values with actual configuration values.
-    /// The placeholders follow the pattern `!{{VALUE_NAME}}!` where VALUE_NAME can be:
-    /// - `site_name`: Replaced with the site's domain name
-    /// - `site_path`: Replaced with the site's root directory path  
-    /// - `ssl_path`: Replaced with the SSL certificate directory path (HTTPS only)
     ///
     /// # Arguments
     ///
-    /// * `protocol` - The protocol type (HTTP or HTTPS) that determines which template to use
+    /// * `protocol` - The protocol type (`NginxProtocol::Http` or `NginxProtocol::Https`)
     ///
     /// # Returns
     ///
-    /// A string containing the complete Nginx configuration with all placeholders replaced.
+    /// A `String` containing the complete Nginx configuration with all placeholders replaced.
+    ///
+    /// # Template Placeholders
+    ///
+    /// The templates use the following placeholder format: `!{{VALUE_NAME}}!`
+    ///
+    /// Available placeholders:
+    /// - `!{{site_name}}!` - Replaced with the site's domain name
+    /// - `!{{site_path}}!` - Replaced with the site's root directory path  
+    /// - `!{{ssl_path}}!` - Replaced with the SSL certificate directory path (HTTPS only)
     ///
     /// # Panics
     ///
-    /// Panics if HTTPS protocol is specified but `ssl_root` is None.
+    /// Panics if `NginxProtocol::Https` is specified but `ssl_root` is `None`.
+    /// This is a programming error that should be caught during development.
     ///
     /// # Examples
     ///
     /// ```
     /// let config = NginxConfig::new(
-    ///     "example.com".to_string(),
+    ///     "api.example.com".to_string(),
     ///     "/var/www/html".to_string(),
     ///     "/etc/nginx/conf.d".to_string(),
-    ///     Some("/etc/nginx/ssl".to_string())
+    ///     true, // SSL enabled
     /// );
     ///
     /// // Generate HTTP configuration
     /// let http_config = config.generate_config(NginxProtocol::Http);
     /// assert!(http_config.contains("listen 80"));
+    /// assert!(http_config.contains("api.example.com"));
     ///
     /// // Generate HTTPS configuration
     /// let https_config = config.generate_config(NginxProtocol::Https);
-    /// assert!(https_config.contains("listen 443"));
+    /// assert!(https_config.contains("listen 443 ssl"));
+    /// assert!(https_config.contains("/var/www/html/api.example.com"));
     /// ```
+    ///
+    /// # Template Selection
+    ///
+    /// - `NginxProtocol::Http` uses `NGINX_HTTP_TEMPLATE`
+    /// - `NginxProtocol::Https` uses `NGINX_HTTPS_TEMPLATE`
     pub fn generate_config(&self, protocol: NginxProtocol) -> String {
         let mut config = match protocol {
             NginxProtocol::Http => NGINX_HTTP_TEMPLATE.to_string(),
@@ -178,21 +346,47 @@ impl NginxConfig {
     }
 }
 
-/// Validates the current nginx configuration using `nginx -t`.
+/// Validates the current system-wide Nginx configuration.
+///
+/// Executes `nginx -t` to verify that the entire Nginx configuration
+/// is syntactically correct and can be loaded successfully.
 ///
 /// # Returns
 ///
-/// * `Ok(())` - If the nginx configuration is valid
-/// * `Err(String)` - If the configuration is invalid, with nginx output
+/// * `Ok(())` - If the Nginx configuration is valid
+/// * `Err(String)` - If the configuration is invalid, containing the nginx error output
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// - The `nginx` command cannot be executed (nginx not installed or not in PATH)
+/// - The Nginx configuration contains syntax errors
+/// - Configuration files reference missing includes or upstreams
+/// - There are permission issues with configuration files
 ///
 /// # Examples
 ///
 /// ```
+/// use nginx::config::validate_nginx_configuration;
+///
 /// match validate_nginx_configuration() {
-///     Ok(()) => println!("✓ Nginx configuration is valid"),
-///     Err(e) => eprintln!("{}", e),
+///     Ok(()) => {
+///         println!("✓ Nginx configuration is valid");
+///         // Safe to reload nginx
+///     }
+///     Err(e) => {
+///         eprintln!("✗ Configuration error: {}", e);
+///         // Do not reload nginx
+///     }
 /// }
 /// ```
+///
+/// # Note
+///
+/// This function requires:
+/// - Nginx to be installed on the system
+/// - The user to have permission to run `nginx -t`
+/// - Typically requires sudo/root privileges in production
 pub fn validate_nginx_configuration() -> Result<(), String> {
     // Execute nginx -t command
     let output = Command::new("nginx")
@@ -214,7 +408,11 @@ pub fn validate_nginx_configuration() -> Result<(), String> {
     }
 }
 
-/// Validates a specific nginx configuration file.
+/// Validates a specific Nginx configuration file in isolation.
+///
+/// Creates a temporary Nginx configuration that includes only the
+/// specified file, allowing validation of individual site configurations
+/// without affecting the main Nginx configuration.
 ///
 /// # Arguments
 ///
@@ -223,7 +421,41 @@ pub fn validate_nginx_configuration() -> Result<(), String> {
 /// # Returns
 ///
 /// * `Ok(())` - If the configuration file is valid
-/// * `Err(String)` - If invalid, with nginx error output
+/// * `Err(String)` - If invalid, containing nginx error output
+///
+/// # How It Works
+///
+/// 1. Creates a temporary main configuration file
+/// 2. Includes the target configuration file in the HTTP context
+/// 3. Runs `nginx -t` against the temporary configuration
+/// 4. Cleans up the temporary file
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Cannot create the temporary configuration file
+/// - The nginx command fails to execute
+/// - The configuration file contains syntax errors
+/// - The configuration references undefined variables or upstreams
+///
+/// # Examples
+///
+/// ```
+/// use nginx::config::validate_nginx_config_file;
+///
+/// let config_path = "/etc/nginx/sites-enabled/example.com.conf";
+/// 
+/// match validate_nginx_config_file(config_path) {
+///     Ok(()) => println!("✓ Configuration file is valid"),
+///     Err(e) => eprintln!("✗ Invalid configuration: {}", e),
+/// }
+/// ```
+///
+/// # Security Note
+///
+/// The temporary file is created in `/tmp` with a unique name based
+/// on the process ID to avoid conflicts. The file is always cleaned up,
+/// even if validation fails.
 pub fn validate_nginx_config_file(config_path: &str) -> Result<(), String> {
     use std::fs;
 
