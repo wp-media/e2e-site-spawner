@@ -37,7 +37,7 @@
 /// # Examples
 ///
 /// ```
-/// use e2e_site_spawner::utils::validators::validate_site_name;
+/// use crate::utils::validators::validate_site_name;
 ///
 /// assert!(validate_site_name("example.com"));
 /// assert!(validate_site_name("sub.example.com"));

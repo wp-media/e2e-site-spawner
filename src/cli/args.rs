@@ -266,7 +266,7 @@ pub fn build_cli() -> Command {
 /// # Usage Example
 ///
 /// ```rust
-/// use e2e_site_spawner::cli::args::get_matches;
+/// use crate::cli::args::get_matches;
 ///
 /// let matches = get_matches();
 /// 

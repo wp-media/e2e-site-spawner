@@ -15,7 +15,7 @@
 //! # Usage
 //!
 //! ```
-//! use e2e_site_spawner::constants::{SITES_PATH, DB_USER};
+//! use crate::constants::{SITES_PATH, DB_USER};
 //! 
 //! println!("Sites will be created in: {}", SITES_PATH);
 //! println!("WordPress database user: {}", DB_USER);

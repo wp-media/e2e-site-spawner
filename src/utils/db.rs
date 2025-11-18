@@ -15,7 +15,7 @@
 //! # Examples
 //!
 //! ```
-//! use e2e_site_spawner::utils::db;
+//! use crate::utils::db;
 //!
 //! // Create a WordPress database
 //! match db::create_wordpress_database("my_blog", true) {
@@ -98,7 +98,7 @@ impl From<mysql::Error> for DbError {
 /// # Examples
 ///
 /// ```
-/// use e2e_site_spawner::utils::db::DbConfig;
+/// use crate::utils::db::DbConfig;
 ///
 /// let config = DbConfig::default(); // Uses root@localhost:3306 with no password
 /// ```
@@ -161,7 +161,7 @@ impl Default for DbConfig {
 /// # Examples
 ///
 /// ```
-/// use e2e_site_spawner::utils::db::create_wordpress_database;
+/// use crate::utils::db::create_wordpress_database;
 ///
 /// // Create with automatic retry
 /// match create_wordpress_database("wp_blog", true) {
@@ -275,7 +275,7 @@ pub fn create_wordpress_database(db_name: &str, should_retry: bool) -> Result<St
 /// # Examples
 ///
 /// ```
-/// use e2e_site_spawner::utils::db::{DbConfig, create_connection};
+/// use crate::utils::db::{DbConfig, create_connection};
 ///
 /// let config = DbConfig::default();
 /// match create_connection(&config) {
@@ -392,7 +392,7 @@ fn create_database(conn: &mut Conn, db_name: &str) -> Result<(), DbError> {
 /// # Examples
 ///
 /// ```
-/// use e2e_site_spawner::utils::db::validate_db_name;
+/// use crate::utils::db::validate_db_name;
 ///
 /// assert!(validate_db_name("wp_blog").is_ok());
 /// assert!(validate_db_name("test_123").is_ok());
@@ -460,7 +460,7 @@ pub fn validate_db_name(name: &str) -> Result<(), DbError> {
 /// # Examples
 ///
 /// ```
-/// use e2e_site_spawner::utils::db::drop_database;
+/// use crate::utils::db::drop_database;
 ///
 /// match drop_database("old_wp_site") {
 ///     Ok(()) => println!("Database removed"),
@@ -516,7 +516,7 @@ pub fn drop_database(db_name: &str) -> Result<(), DbError> {
 /// # Examples
 ///
 /// ```
-/// use e2e_site_spawner::utils::db::database_exists;
+/// use crate::utils::db::database_exists;
 ///
 /// // Check without existing connection
 /// match database_exists("wp_mysite", None) {
@@ -589,7 +589,7 @@ pub fn database_exists(db_name: &str, conn: Option<&mut Conn>) -> Result<bool, D
 /// # Examples
 ///
 /// ```
-/// use e2e_site_spawner::utils::db::create_db_name;
+/// use crate::utils::db::create_db_name;
 ///
 /// assert_eq!(create_db_name("example.com"), "wp_example_com");
 /// assert_eq!(create_db_name("my-blog.example.com"), "wp_my_blog_example_com");
