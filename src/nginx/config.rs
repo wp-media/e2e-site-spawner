@@ -190,14 +190,14 @@ impl NginxConfig {
     /// - Prevent manual path construction errors
     /// - Centralize path generation logic
     pub fn new(site_name: String, sites_path: String, nginx_config: String, use_ssl: bool) -> Self {
-        let ssl_path = use_ssl.then(|| format!("{}/{}", SITES_SSL_PATH, site_name));
+        let ssl_root = use_ssl.then(|| format!("{}/{}", SITES_SSL_PATH, site_name));
         let nginx_config_file_path = format!("{}/{}.conf", nginx_config, site_name);
         let root = format!("{}/{}", sites_path, site_name);
         NginxConfig {
             site_name: site_name.clone(),
             root,
             nginx_config_file_path,
-            ssl_root: ssl_path.map(|path| format!("{}/{}", path, site_name)),
+            ssl_root,
         }
     }
 
