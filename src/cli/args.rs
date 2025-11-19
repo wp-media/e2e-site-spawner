@@ -204,34 +204,34 @@ pub fn build_cli() -> Command {
                         .index(1),
                 ),
         )
-    // .subcommand(
-    //     Command::new("update")
-    //         .about("Modifies an existing site's configuration")
-    //         .long_about("Updates an existing site by adding WordPress and/or SSL support")
-    //         .after_help("EXAMPLES:\n    \
-    //             e2sp update example.e2e.rocketlabsqa.ovh --wp       # Add WordPress to a static site\n    \
-    //             e2sp update example.e2e.rocketlabsqa.ovh --ssl      # Add SSL certificate to HTTP-only site\n    \
-    //             e2sp update example.e2e.rocketlabsqa.ovh --wp --ssl # Add both WordPress and SSL")
-    //         .arg(
-    //             Arg::new("site_name")
-    //                 .help("The name of the site to update (e.g., example.e2e.rocketlabsqa.ovh)")
-    //                 .required(true)
-    //                 .value_name("SITE_NAME")
-    //                 .index(1),
-    //         )
-    //         .arg(
-    //             Arg::new("wp")
-    //                 .long("wp")
-    //                 .help("Install WordPress on an existing non-WP site")
-    //                 .action(clap::ArgAction::SetTrue),
-    //         )
-    //         .arg(
-    //             Arg::new("ssl")
-    //                 .long("ssl")
-    //                 .help("Add SSL certificate to an HTTP-only site")
-    //                 .action(clap::ArgAction::SetTrue),
-    //         ),
-    // )
+    .subcommand(
+        Command::new("update")
+            .about("Modifies an existing site's configuration")
+            .long_about("Updates an existing site by adding WordPress and/or SSL support")
+            .after_help("EXAMPLES:\n    \
+                e2sp update example.e2e.rocketlabsqa.ovh --wp       # Add WordPress to a static site\n    \
+                e2sp update example.e2e.rocketlabsqa.ovh --ssl      # Add SSL certificate to HTTP-only site\n    \
+                e2sp update example.e2e.rocketlabsqa.ovh --wp --ssl # Add both WordPress and SSL")
+            .arg(
+                Arg::new("site_name")
+                    .help("The name of the site to update (e.g., example.e2e.rocketlabsqa.ovh)")
+                    .required(true)
+                    .value_name("SITE_NAME")
+                    .index(1),
+            )
+            .arg(
+                Arg::new("wp")
+                    .long("wp")
+                    .help("Install WordPress on an existing non-WP site")
+                    .action(clap::ArgAction::SetTrue),
+            )
+            .arg(
+                Arg::new("ssl")
+                    .long("ssl")
+                    .help("Add SSL certificate to an HTTP-only site")
+                    .action(clap::ArgAction::SetTrue),
+            ),
+    )
     // .subcommand(
     //     Command::new("help")
     //         .about("Displays help information")

@@ -817,6 +817,148 @@ pub fn remove_directory(dir_path: &str) -> Result<(), FileCreationError> {
     Ok(())
 }
 
+/// Checks if a site already exists on the filesystem.
+///
+/// This function determines whether a site has already been created by checking
+/// for the existence of either the site's root directory or its Nginx configuration
+/// file. It uses an OR logic to detect partial installations or remnants from
+/// previous setup attempts.
+///
+/// # Arguments
+///
+/// * `nginx_config` - The Nginx configuration object containing the site's root
+///                    directory path and configuration file path.
+///
+/// # Returns
+///
+/// * `true` - If either the site directory OR Nginx config file exists
+/// * `false` - If neither the directory nor config file exists
+///
+/// # Detection Logic
+///
+/// The function returns `true` if **either** of these exists:
+/// - Site root directory (e.g., `/var/www/html/example.com/`)
+/// - Nginx configuration file (e.g., `/etc/nginx/sites-available/example.com.conf`)
+///
+/// Using OR logic is intentional because:
+/// - Partial installations should be detected
+/// - Either component existing indicates a site was attempted
+/// - Prevents accidental overwrites or duplicate installations
+/// - Allows detection of incomplete setups that need cleanup
+///
+/// # Use Cases
+///
+/// This function is typically used to:
+/// - Prevent duplicate site creation attempts
+/// - Check if a site can be safely spawned
+/// - Detect partial installations from failed attempts
+/// - Validate cleanup operations were successful
+/// - Determine if update operations are applicable
+///
+/// # Examples
+///
+/// ```ignore
+/// use nginx::config::NginxConfig;
+/// use utils::sites::check_if_site_exists;
+///
+/// let nginx_config = NginxConfig::new(
+///     "example.com".to_string(),
+///     "/var/www/html/example.com".to_string(),
+///     "/etc/nginx/sites-available".to_string(),
+///     false,
+/// );
+///
+/// if check_if_site_exists(&nginx_config) {
+///     println!("Site already exists, cannot create");
+///     return Err("Site exists");
+/// } else {
+///     println!("Site does not exist, safe to create");
+///     // Proceed with site creation
+/// }
+/// ```
+///
+/// # Common Scenarios
+///
+/// 1. **Fresh Installation**: Neither exists → returns `false`
+/// 2. **Complete Site**: Both exist → returns `true`
+/// 3. **Partial Setup**: Only directory exists → returns `true`
+/// 4. **Config Only**: Only nginx config exists → returns `true`
+/// 5. **After Deletion**: Neither exists → returns `false`
+///
+/// # File System Paths Checked
+///
+/// ```text
+/// Site Root:    /var/www/html/{site_name}/
+///               └── (any content indicates existence)
+///
+/// Nginx Config: /etc/nginx/sites-available/{site_name}.conf
+///               └── (file presence indicates existence)
+/// ```
+///
+/// # Performance Note
+///
+/// This function only checks for path existence using filesystem metadata,
+/// not contents. This is efficient but doesn't validate:
+/// - Whether the site is functional
+/// - If WordPress is installed in the directory
+/// - If the Nginx config is valid
+/// - Whether SSL is configured
+///
+/// # Edge Cases
+///
+/// The function handles these scenarios:
+/// - Symbolic links (follows links to check targets)
+/// - Empty directories (still returns true)
+/// - Permission denied (returns false, treats as non-existent)
+/// - Broken symbolic links (returns false)
+///
+/// # Related Functions
+///
+/// Works in conjunction with:
+/// - [`spawn_site`] - Uses this to prevent duplicate sites
+/// - [`delete_site`] - Should make this return false after cleanup
+/// - [`update_site`] - Requires this to return true for updates
+/// - [`revert_site_spawn`] - Cleans up paths this function checks
+///
+/// # Security Considerations
+///
+/// - Read-only operation, doesn't modify filesystem
+/// - No sensitive information exposed
+/// - Safe to call without elevated privileges
+/// - Path traversal not a concern (uses pre-validated paths)
+///
+/// # Implementation Note
+///
+/// Uses `std::path::Path::exists()` which:
+/// - Returns false for non-existent paths
+/// - Returns false if permission denied
+/// - Follows symbolic links
+/// - Is atomic and thread-safe
+///
+/// # Why Check Both Paths?
+///
+/// Checking both paths with OR logic ensures detection of:
+/// - Failed installations (directory created but nginx config failed)
+/// - Manual partial setups (user created directory but no config)
+/// - Incomplete deletions (config removed but directory remains)
+/// - Config-only setups (reverse proxy without local files)
+///
+/// # Typical Workflow
+///
+/// ```text
+/// 1. check_if_site_exists() → false (nothing exists)
+/// 2. spawn_site() creates directory and config
+/// 3. check_if_site_exists() → true (both exist)
+/// 4. delete_site() removes both
+/// 5. check_if_site_exists() → false (cleaned up)
+/// ```
+pub fn check_if_site_exists(nginx_config: &nginx::config::NginxConfig) -> bool {
+    let site_root = Path::new(nginx_config.root.as_str());
+    let nginx_config_path = Path::new(nginx_config.nginx_config_file_path.as_str());
+    
+    site_root.exists() || nginx_config_path.exists()
+}
+
 /// Removes a single file.
 ///
 /// Safely removes a file from the filesystem. If the file doesn't exist,

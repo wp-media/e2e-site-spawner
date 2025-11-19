@@ -424,6 +424,111 @@ pub fn reload_nginx() -> Result<(), String> {
     Ok(())
 }
 
+/// Checks if HTTPS/SSL is configured in an Nginx configuration file.
+///
+/// This function examines an existing Nginx configuration file to determine whether
+/// HTTPS support is already enabled. It looks for specific SSL-related directives
+/// that indicate a properly configured HTTPS server block.
+///
+/// # Arguments
+///
+/// * `nginx_config_file_path` - The full path to the Nginx configuration file to check
+///
+/// # Returns
+///
+/// * `true` - If both HTTPS listener (port 443) and SSL certificate are configured
+/// * `false` - If either directive is missing or the file cannot be read
+///
+/// # Detection Logic
+///
+/// The function considers HTTPS to be configured when **both** of the following
+/// conditions are met:
+/// 1. The configuration contains `listen 443` (HTTPS port listener)
+/// 2. The configuration contains `ssl_certificate` (SSL certificate path)
+///
+/// Both directives must be present because:
+/// - `listen 443` alone doesn't guarantee SSL is enabled (could be plain HTTP on 443)
+/// - `ssl_certificate` alone doesn't mean the server is listening on HTTPS port
+///
+/// # Examples
+///
+/// ```ignore
+/// use nginx::utils::check_if_https_in_nginx_config_file;
+///
+/// // Check if a site already has HTTPS configured
+/// let config_path = "/etc/nginx/sites-available/example.com.conf";
+/// if check_if_https_in_nginx_config_file(config_path) {
+///     println!("HTTPS is already configured for this site");
+/// } else {
+///     println!("Site is HTTP-only, SSL can be added");
+/// }
+/// ```
+///
+/// # Error Handling
+///
+/// If the file cannot be read (doesn't exist, permission denied, etc.),
+/// the function returns `false` rather than panicking. This is intentional
+/// to allow the calling code to proceed with SSL setup when uncertain about
+/// the current state.
+///
+/// # Use Cases
+///
+/// This function is typically used to:
+/// - Prevent duplicate SSL configuration attempts
+/// - Determine if SSL removal is possible
+/// - Check site status for reporting or migration
+/// - Validate SSL setup after configuration changes
+///
+/// # Limitations
+///
+/// The function performs a simple text search and may not detect:
+/// - Commented-out SSL configurations
+/// - SSL configured through included files
+/// - Non-standard SSL configurations (custom ports, SNI, etc.)
+/// - Malformed configurations that wouldn't work anyway
+///
+/// # Performance Note
+///
+/// The entire file is read into memory. For very large configuration files,
+/// this might be inefficient. However, Nginx configuration files are typically
+/// small enough that this is not a concern.
+///
+/// # Security Considerations
+///
+/// - The function only reads the file, never modifies it
+/// - No sensitive information (certificates, keys) is exposed
+/// - Returns a simple boolean to avoid leaking configuration details
+///
+/// # Common Nginx HTTPS Configuration
+///
+/// A typical HTTPS server block that would be detected:
+/// ```nginx
+/// server {
+///     listen 443 ssl;
+///     server_name example.com;
+///     
+///     ssl_certificate /etc/nginx/ssl/example.com/fullchain.pem;
+///     ssl_certificate_key /etc/nginx/ssl/example.com/privkey.pem;
+///     
+///     # ... rest of configuration
+/// }
+/// ```
+///
+/// # See Also
+///
+/// * [`create_nginx_file`] - Creates new Nginx configuration files
+/// * [`append_to_nginx_file`] - Adds HTTPS configuration to existing files
+/// * [`ssl::generate_ssl`] - Generates SSL certificates for sites
+pub fn check_if_https_in_nginx_config_file(nginx_config_file_path: &str) -> bool {
+    // Read the configuration file, returning empty string if it fails
+    // This allows graceful handling of missing or inaccessible files
+    let content = fs::read_to_string(nginx_config_file_path).unwrap_or_default();
+    
+    // Check for both HTTPS port listener and SSL certificate directive
+    // Both must be present for a valid HTTPS configuration
+    content.contains("listen 443") && content.contains("ssl_certificate")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

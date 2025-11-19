@@ -227,6 +227,138 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
     Ok(())
 }
 
+/// Checks if SSL certificate files exist in the specified directory.
+///
+/// This function verifies the presence of SSL certificate files that would
+/// indicate an already configured SSL setup for a site. It checks for both
+/// the private key and the certificate chain files in the SSL root directory.
+///
+/// # Arguments
+///
+/// * `ssl_root` - The root directory path where SSL certificates are stored,
+///                typically `/etc/nginx/ssl/{site_name}/`
+///
+/// # Returns
+///
+/// * `true` - If either the private key OR the certificate file exists
+/// * `false` - If neither file exists in the specified directory
+///
+/// # Detection Logic
+///
+/// The function returns `true` if **either** of these files exists:
+/// - `{ssl_root}/privkey.pem` - The private key file
+/// - `{ssl_root}/fullchain.pem` - The full certificate chain file
+///
+/// The OR logic is intentional because:
+/// - Partial SSL setup should still prevent regeneration
+/// - Either file existing indicates SSL was attempted
+/// - Prevents accidental overwrite of certificates
+/// - Allows detection of incomplete SSL installations
+///
+/// # File Paths
+///
+/// Standard certificate file locations checked:
+/// ```text
+/// {ssl_root}/
+/// ├── privkey.pem      # Private key (RSA/ECDSA)
+/// └── fullchain.pem    # Certificate + intermediate certificates
+/// ```
+///
+/// # Use Cases
+///
+/// This function is typically used to:
+/// - Prevent duplicate SSL certificate generation
+/// - Check if SSL can be safely removed
+/// - Verify SSL setup completion
+/// - Detect partial SSL installations that need cleanup
+/// - Determine if update operations can proceed
+///
+/// # Examples
+///
+/// ```ignore
+/// use utils::ssl::check_if_ssl_files_exist;
+///
+/// // Check if SSL is already configured for a site
+/// let ssl_root = "/etc/nginx/ssl/example.com";
+/// if check_if_ssl_files_exist(ssl_root) {
+///     println!("SSL certificates already exist, skipping generation");
+/// } else {
+///     println!("No SSL certificates found, safe to generate");
+/// }
+///
+/// // Use in update operations
+/// let nginx_config = NginxConfig::new(/* ... */);
+/// if let Some(ssl_root) = &nginx_config.ssl_root {
+///     if check_if_ssl_files_exist(ssl_root) {
+///         return Err("Cannot update: SSL already configured");
+///     }
+/// }
+/// ```
+///
+/// # Performance Note
+///
+/// This function only checks for file existence using filesystem metadata,
+/// not file contents. This is efficient but doesn't validate:
+/// - Certificate validity or expiration
+/// - Certificate/key matching
+/// - Proper PEM formatting
+/// - Certificate domain matching
+///
+/// # Security Considerations
+///
+/// - Only checks existence, doesn't read certificate contents
+/// - Doesn't expose any sensitive information
+/// - No file permissions are modified
+/// - Safe to call without elevated privileges (read-only check)
+///
+/// # Edge Cases
+///
+/// The function handles these scenarios gracefully:
+/// - Non-existent ssl_root directory (returns false)
+/// - Empty directory (returns false)
+/// - Symbolic links (follows links to check target)
+/// - Permission denied (returns false, doesn't panic)
+/// - Other file types with same names (returns true)
+///
+/// # Related Functions
+///
+/// Works in conjunction with:
+/// - [`generate_ssl`] - Creates the certificates this function checks for
+/// - [`update_with_ssl`] - Uses this to prevent duplicate SSL setup
+/// - [`delete_site`] - Should remove files this function checks
+///
+/// # Implementation Note
+///
+/// Uses `std::path::Path::exists()` which:
+/// - Returns false for non-existent paths
+/// - Returns false if permission denied
+/// - Follows symbolic links
+/// - Is atomic and thread-safe
+///
+/// # Why Not Check Both Files?
+///
+/// We use OR (`||`) instead of AND (`&&`) because:
+/// - Partial installations should block regeneration
+/// - Certificate might be manually placed
+/// - Private key might exist from previous attempt
+/// - Either file indicates SSL work was done
+///
+/// # Typical Workflow
+///
+/// ```text
+/// 1. check_if_ssl_files_exist() -> false
+/// 2. generate_ssl() creates both files
+/// 3. check_if_ssl_files_exist() -> true
+/// 4. Subsequent SSL operations are blocked
+/// ```
+pub fn check_if_ssl_files_exist(ssl_root: &str) -> bool {
+    let privkey_path = format!("{}/privkey.pem", ssl_root);
+    let fullchain_path = format!("{}/fullchain.pem", ssl_root);
+
+    std::path::Path::new(&privkey_path).exists() || 
+    std::path::Path::new(&fullchain_path).exists()
+}
+
 /// Prints a warning message about SSL requirements.
 ///
 /// Displays a formatted warning to inform users about the prerequisites

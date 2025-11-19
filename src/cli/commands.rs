@@ -25,10 +25,10 @@
 use crate::constants::{DB_CHARSET, DB_PASSWORD, DB_USER};
 use crate::constants::{DB_HOST, HTML_DEFAULT_INDEX_FILE, NGINX_CONF_D_PATH, SITES_PATH};
 use crate::nginx::config::validate_nginx_configuration;
-use crate::nginx::{self, reload_nginx};
+use crate::nginx::{self, reload_nginx, check_if_https_in_nginx_config_file};
 use crate::nginx::{append_to_nginx_file, create_nginx_file};
 use crate::utils::db;
-use crate::utils::sites::{self, create_file_with_content_if_not_exists, revert_site_spawn};
+use crate::utils::sites::{self, create_file_with_content_if_not_exists, revert_site_spawn, check_if_site_exists, put_wordpress_in_site_directory};
 use crate::utils::ssl;
 use crate::utils::validators::validate_site_name;
 use std::env;
@@ -260,9 +260,12 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
     } else {
         println!("WordPress will be installed on this site.");
     }
-    
-    validate_site_name(site_name);
-    
+
+    if !validate_site_name(site_name) {
+        eprintln!("✗ Invalid site name: {}", site_name);
+        process::exit(1);
+    }
+
     // Initialize tracking for rollback
     let mut steps_completed: Vec<SpawnSteps> = Vec::new();
     
@@ -273,7 +276,10 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         NGINX_CONF_D_PATH.to_string(),
         ssl,
     );
-    
+    if check_if_site_exists(&nginx_config) {
+        eprintln!("✗ Site '{}' seems to already exist. Cannot continue.", site_name);
+        process::exit(1);
+    }
     nginx_config.validate().unwrap_or_else(|e| {
         eprintln!("✗ Validation failed: {}", e);
         process::exit(1);
@@ -792,64 +798,541 @@ pub fn activate_site(site_name: &str) {
     });
 }
 
-// /// Updates an existing site with new configurations.
-// ///
-// /// This function allows modification of an existing site's configuration,
-// /// such as adding WordPress to a static site or enabling SSL on a site
-// /// that was initially created without it.
-// ///
-// /// # Arguments
-// ///
-// /// * `site_name` - The name of the site to update.
-// /// * `wp` - If `true`, installs WordPress on an existing static site.
-// /// * `ssl` - If `true`, generates SSL certificates and enables HTTPS.
-// ///
-// /// # Status
-// ///
-// /// ⚠️ **Not Implemented**: This function is currently a placeholder
-// /// for future functionality and will not perform any operations.
-// ///
-// /// # Planned Features
-// ///
-// /// When implemented, this function will support:
-// ///
-// /// ## WordPress Addition
-// /// - Install WordPress in existing static sites
-// /// - Create database and wp-config.php
-// /// - Preserve existing static files
-// /// - Update Nginx configuration for PHP processing
-// ///
-// /// ## SSL Enablement
-// /// - Generate Let's Encrypt certificates
-// /// - Update Nginx configuration for HTTPS
-// /// - Add HTTP to HTTPS redirect
-// /// - Preserve existing site functionality
-// ///
-// /// ## Other Updates
-// /// - Modify Nginx configuration parameters
-// /// - Update site directory permissions
-// /// - Change PHP version or configuration
-// /// - Enable/disable caching
-// ///
-// /// # Example (Future)
-// ///
-// /// ```no_run
-// /// // Add WordPress to a static site
-// /// update_site("static.local", true, false);
-// ///
-// /// // Enable SSL on an HTTP-only site
-// /// update_site("http-only.local", false, true);
-// ///
-// /// // Add both WordPress and SSL
-// /// update_site("basic.local", true, true);
-// /// ```
-// pub fn update_site(site_name: &str, wp: bool, ssl: bool) {
-//     println!("Preparing to update site: {}", site_name);
-//     if wp {
-//         println!("WordPress will be installed on this site.");
-//     }
-//     if ssl {
-//         println!("SSL will be installed on this site.");
-//     }
-//     // Future implementation goes here
-// }
+/// Updates an existing site with new configurations.
+///
+/// This function allows modification of an existing site's configuration,
+/// such as adding WordPress to a static site or enabling SSL on a site
+/// that was initially created without it.
+///
+/// # Arguments
+///
+/// * `site_name` - The name of the site to update.
+/// * `wp` - If `true`, installs WordPress on an existing static site.
+/// * `ssl` - If `true`, generates SSL certificates and enables HTTPS.
+///
+/// # Status
+///
+/// ⚠️ **Not Implemented**: This function is currently a placeholder
+/// for future functionality and will not perform any operations.
+///
+/// # Planned Features
+///
+/// When implemented, this function will support:
+///
+/// ## WordPress Addition
+/// - Install WordPress in existing static sites
+/// - Create database and wp-config.php
+/// - Preserve existing static files
+/// - Update Nginx configuration for PHP processing
+///
+/// ## SSL Enablement
+/// - Generate Let's Encrypt certificates
+/// - Update Nginx configuration for HTTPS
+/// - Add HTTP to HTTPS redirect
+/// - Preserve existing site functionality
+///
+/// ## Other Updates
+/// - Modify Nginx configuration parameters
+/// - Update site directory permissions
+/// - Change PHP version or configuration
+/// - Enable/disable caching
+///
+/// # Example (Future)
+///
+/// ```no_run
+/// // Add WordPress to a static site
+/// update_site("static.local", true, false);
+///
+/// // Enable SSL on an HTTP-only site
+/// update_site("http-only.local", false, true);
+///
+/// // Add both WordPress and SSL
+/// update_site("basic.local", true, true);
+/// ```
+pub fn update_site(site_name: &str, wp: bool, ssl: bool) {
+    if !wp && !ssl {
+        println!("No updates specified for site '{}'. Exiting.", site_name);
+        process::exit(0);
+    }
+    if !validate_site_name(site_name) {
+        eprintln!("✗ Invalid site name: {}", site_name);
+        process::exit(1);
+    }
+    let nginx_config = nginx::config::NginxConfig::new(
+        site_name.to_string(),
+        SITES_PATH.to_string(),
+        NGINX_CONF_D_PATH.to_string(),
+        ssl,
+    );
+    nginx_config.validate().unwrap_or_else(|e| {
+        eprintln!("✗ Validation failed: {}", e);
+        process::exit(1);
+    });
+        // Phase 1: Pre-validation
+    validate_nginx_configuration().unwrap_or_else(|e| {
+        eprintln!("✗ Nginx configuration validation failed before updating.");
+        eprintln!("Make sure Nginx configuration is okay, since nginx reloads is required.");
+        eprintln!("Nginx error: \n{}", e);
+        process::exit(1);
+    });
+    if !check_if_site_exists(&nginx_config) {
+        eprintln!("✗ Site '{}' does not exist. Cannot update.", site_name);
+        process::exit(1);
+    }
+    println!("Preparing to update site: {}", site_name);
+    if wp {
+        update_with_wordpress(&nginx_config).unwrap_or(());
+    } if ssl {
+        update_with_ssl(&nginx_config).unwrap_or(());
+    }
+}
+
+/// Installs WordPress on an existing static site.
+///
+/// This function transforms a static HTML site into a dynamic WordPress site by
+/// installing WordPress files, creating a database, and generating the necessary
+/// configuration. The function ensures no existing WordPress installation is present
+/// before proceeding with the installation.
+///
+/// # Arguments
+///
+/// * `nginx_config` - The Nginx configuration object containing site details and paths.
+///
+/// # Returns
+///
+/// * `Ok(())` - WordPress was successfully installed on the site
+/// * `Err(())` - Installation failed (WordPress already exists, database issues, etc.)
+///
+/// # Process Flow
+///
+/// 1. **Pre-installation Checks**
+///    - Verifies WordPress is not already installed (checks for wp-config.php)
+///    - Confirms database doesn't already exist for the site
+///    - Ensures site directory exists and is accessible
+///
+/// 2. **WordPress File Installation**
+///    - Downloads latest WordPress version
+///    - Extracts WordPress files to site directory
+///    - Preserves existing static files (index.html, etc.)
+///    - Sets appropriate file permissions
+///
+/// 3. **Database Creation**
+///    - Creates MySQL database with UTF8MB4 charset
+///    - Names database as `wp_{site_name}` (with underscores)
+///    - Grants full privileges to configured database user
+///    - Handles name conflicts with numeric suffixes if needed
+///
+/// 4. **Configuration Generation**
+///    - Creates wp-config.php with database credentials
+///    - Generates unique authentication keys and salts
+///    - Sets WordPress database constants
+///    - Configures debug settings based on environment
+///
+/// # Files Created/Modified
+///
+/// ```text
+/// /var/www/html/{site_name}/
+/// ├── wp-admin/                  # WordPress admin files (created)
+/// ├── wp-content/                # Themes, plugins, uploads (created)
+/// ├── wp-includes/               # WordPress core files (created)
+/// ├── wp-config.php              # Database configuration (created)
+/// ├── index.php                  # WordPress entry point (created)
+/// └── (existing static files)    # Preserved during installation
+/// ```
+///
+/// # Database Structure
+///
+/// Creates database: `wp_{site_name}` containing:
+/// - WordPress core tables (wp_posts, wp_users, etc.)
+/// - Charset: UTF8MB4 for full Unicode support
+/// - Collation: utf8mb4_unicode_ci
+///
+/// # Error Conditions
+///
+/// The function will fail and return `Err(())` if:
+/// - WordPress is already installed (wp-config.php exists)
+/// - Database already exists for the site
+/// - Unable to download or extract WordPress files
+/// - Database creation fails (connection issues, permissions)
+/// - Unable to write wp-config.php file
+/// - File system operations fail (permissions, disk space)
+///
+/// # Rollback Behavior
+///
+/// On failure, the function attempts partial cleanup:
+/// - Database is dropped if wp-config.php creation fails
+/// - WordPress files may remain if database creation fails
+/// - Original static files are preserved throughout
+/// - Manual cleanup may be required for partial installations
+///
+/// # Safety Considerations
+///
+/// - Checks for existing installations before proceeding
+/// - Preserves existing static content during installation
+/// - Database credentials are never logged or displayed
+/// - File permissions are set appropriately for security
+/// - Validates each step before proceeding to the next
+///
+/// # Example
+///
+/// ```no_run
+/// let nginx_config = NginxConfig::new(
+///     "static-site.com".to_string(),
+///     "/var/www/html/static-site.com".to_string(),
+///     "/etc/nginx/conf.d".to_string(),
+///     false,  // SSL configuration
+/// );
+///
+/// match update_with_wordpress(&nginx_config) {
+///     Ok(()) => println!("WordPress installed successfully"),
+///     Err(()) => eprintln!("Failed to install WordPress"),
+/// }
+/// ```
+///
+/// # Prerequisites
+///
+/// - Site must exist as a static site (directory created)
+/// - MySQL/MariaDB server must be running and accessible
+/// - Database user must have CREATE privileges
+/// - Sufficient disk space for WordPress files (~50MB)
+/// - Write permissions on the site directory
+/// - No existing WordPress installation in the directory
+///
+/// # Post-Installation Requirements
+///
+/// After successful installation:
+/// - Navigate to site URL to complete WordPress setup wizard
+/// - Configure site title, admin user, and password
+/// - Choose initial theme and plugins
+/// - Configure permalink structure if needed
+/// - Set up regular backups for database and files
+///
+/// # Migration Notes
+///
+/// When converting a static site:
+/// - Static HTML files are preserved but not linked
+/// - Consider migrating static content to WordPress pages
+/// - Update Nginx configuration for PHP processing if needed
+/// - Configure WordPress permalinks to match old URLs if applicable
+///
+/// # Performance Considerations
+///
+/// - WordPress requires PHP-FPM for processing
+/// - Database queries add latency compared to static files
+/// - Consider caching solutions (Redis, Memcached) for production
+/// - Regular database optimization may be needed
+///
+/// # Security Recommendations
+///
+/// Post-installation security steps:
+/// - Change default "admin" username if used
+/// - Enable two-factor authentication
+/// - Keep WordPress and plugins updated
+/// - Configure file permissions properly (755 for directories, 644 for files)
+/// - Consider security plugins like Wordfence or Sucuri
+///
+/// # See Also
+///
+/// * [`put_wordpress_in_site_directory`] - Core WordPress installation logic
+/// * [`create_wordpress_database`] - Database creation with retry logic
+/// * [`create_wp_config_file`] - Configuration file generation
+/// * [`spawn_site`] - Creates new sites with WordPress from scratch
+fn update_with_wordpress(nginx_config: &nginx::config::NginxConfig) -> Result<(), ()> {
+    let site_name = &nginx_config.site_name;
+    
+    // Pre-installation check: Verify WordPress is not already installed
+    let wp_config_path = format!("{}/wp-config.php", nginx_config.root);
+    if Path::new(&wp_config_path).exists() {
+        eprintln!("✗ WordPress seems to already exist for site '{}'. Cannot update.", site_name);
+        eprintln!("  Found existing wp-config.php at: {}", wp_config_path);
+        return Err(());
+    }
+    
+    // Check if database already exists (would indicate partial or previous installation)
+    let db_name = db::create_db_name(site_name);
+    match db::database_exists(&db_name, None) {
+        Ok(exists) => {
+            if exists {
+                eprintln!("✗ Database '{}' already exists for site '{}'. Cannot update.", db_name, site_name);
+                eprintln!("  This may indicate a previous WordPress installation.");
+                eprintln!("  Please check and clean up any existing database if needed.");
+                return Err(());
+            }
+        }
+        Err(e) => {
+            eprintln!("✗ Failed to check database existence: {}", e);
+            eprintln!("  Cannot proceed without verifying database state.");
+            return Err(());
+        }
+    }
+    
+    println!("Attempting to install WordPress on this site...");
+    println!("  Site directory: {}", nginx_config.root);
+    println!("  Database name: {}", db_name);
+    
+    // Step 1: Download and extract WordPress files to site directory
+    match put_wordpress_in_site_directory(nginx_config.root.as_str()) {
+        Ok(()) => {
+            println!("✓ WordPress files installed successfully in site directory");
+        }
+        Err(e) => {
+            eprintln!("✗ Failed to install WordPress files: {}", e);
+            eprintln!("  Ensure the site directory exists and is writable.");
+            return Err(());
+        }
+    }
+    
+    // Step 2: Create MySQL database for WordPress
+    match db::create_wordpress_database(&db_name, false) {
+        Ok(created_db_name) => {
+            println!("✓ Database '{}' created successfully", created_db_name);
+            
+            // Note: created_db_name might differ from db_name if a suffix was added
+            // due to conflicts, but we use the original for consistency
+        }
+        Err(e) => {
+            eprintln!("✗ Failed to create database: {}", e);
+            eprintln!("  WordPress files have been installed but database creation failed.");
+            eprintln!("  You may need to manually clean up the WordPress files.");
+            return Err(());
+        }
+    }
+    
+    // Step 3: Generate WordPress configuration file with database credentials
+    match sites::create_wp_config_file(
+        &nginx_config.root,
+        &db_name,
+        DB_USER,
+        DB_PASSWORD,
+        DB_HOST,
+        DB_CHARSET,
+    ) {
+        Ok(()) => {
+            println!("✓ WordPress configuration file (wp-config.php) created successfully");
+        }
+        Err(e) => {
+            eprintln!("✗ Failed to create wp-config.php file: {}", e);
+            eprintln!("  Attempting to clean up database...");
+            
+            // Rollback: Remove the database since configuration failed
+            match db::drop_database(&db_name) {
+                Ok(()) => {
+                    println!("  Database '{}' has been removed.", db_name);
+                }
+                Err(drop_err) => {
+                    eprintln!("  WARNING: Failed to remove database '{}': {}", db_name, drop_err);
+                    eprintln!("  Manual cleanup of the database may be required.");
+                }
+            }
+            
+            eprintln!("  WordPress files remain in the directory and need manual cleanup.");
+            return Err(());
+        }
+    }
+    
+    println!("✓ WordPress successfully installed on site '{}'", site_name);
+    println!("");
+    println!("  Next steps:");
+    println!("  1. Navigate to http://{} to complete WordPress setup", site_name);
+    println!("  2. Follow the installation wizard to set up your admin account");
+    println!("  3. Configure your site settings and install themes/plugins as needed");
+    
+    Ok(())
+}
+
+/// Adds SSL/HTTPS support to an existing HTTP-only site.
+///
+/// This function enables SSL on a site that was initially created without HTTPS support.
+/// It generates Let's Encrypt certificates, updates the Nginx configuration to include
+/// HTTPS server blocks, and validates all changes before committing them.
+///
+/// # Arguments
+///
+/// * `nginx_config` - The Nginx configuration object containing site details and paths.
+///
+/// # Returns
+///
+/// * `Ok(())` - SSL was successfully enabled for the site
+/// * `Err(())` - SSL enablement failed (site already has SSL, certificate generation failed, etc.)
+///
+/// # Process Flow
+///
+/// 1. **Pre-flight Checks**
+///    - Verifies SSL is not already enabled (checks certificate files and config)
+///    - Backs up the current Nginx configuration for rollback
+///
+/// 2. **SSL Certificate Generation**
+///    - Creates SSL directory at `/etc/nginx/ssl/{site_name}/`
+///    - Generates Let's Encrypt certificates via acme.sh
+///    - Installs certificates in the SSL directory
+///
+/// 3. **Nginx Configuration Update**
+///    - Appends HTTPS server block to existing configuration
+///    - Adds SSL certificate paths and security headers
+///    - Configures HTTP to HTTPS redirect
+///
+/// 4. **Validation & Rollback**
+///    - Validates the updated Nginx configuration
+///    - Reverts all changes if validation fails
+///    - Preserves original configuration on any error
+///
+/// # Files Modified
+///
+/// ```text
+/// /etc/nginx/conf.d/{site_name}.conf     # Updated with HTTPS server block
+/// /etc/nginx/ssl/{site_name}/
+/// ├── privkey.pem                        # Private key (created)
+/// └── fullchain.pem                       # Certificate chain (created)
+/// ```
+///
+/// # Error Conditions
+///
+/// The function will fail and return `Err(())` if:
+/// - SSL files already exist in the SSL directory
+/// - HTTPS configuration already exists in the Nginx config file
+/// - Unable to read the existing Nginx configuration
+/// - SSL certificate generation fails (domain verification, rate limits, etc.)
+/// - Nginx configuration becomes invalid after updates
+/// - File system operations fail (permissions, disk space, etc.)
+///
+/// # Rollback Behavior
+///
+/// On failure, the function attempts to restore the original state:
+/// - Nginx configuration is reverted to the backed-up version
+/// - SSL certificates may remain (manual cleanup required)
+/// - No database or WordPress files are affected
+///
+/// # Safety Considerations
+///
+/// - The function backs up the Nginx configuration before modifications
+/// - All changes are validated before being committed
+/// - Partial updates are avoided through atomic operations where possible
+/// - SSL private keys are created with restricted permissions
+///
+/// # Example
+///
+/// ```no_run
+/// let nginx_config = NginxConfig::new(
+///     "example.com".to_string(),
+///     "/var/www/html".to_string(),
+///     "/etc/nginx/conf.d".to_string(),
+///     true,  // SSL enabled in config object
+/// );
+///
+/// match update_with_ssl(&nginx_config) {
+///     Ok(()) => println!("SSL enabled successfully"),
+///     Err(()) => eprintln!("Failed to enable SSL"),
+/// }
+/// ```
+///
+/// # Prerequisites
+///
+/// - Site must exist and be accessible via HTTP
+/// - Domain must be properly configured (DNS pointing to server)
+/// - Port 80 must be accessible for Let's Encrypt validation
+/// - acme.sh must be installed and configured
+/// - User must have permissions to modify Nginx configurations
+///
+/// # Post-Success Requirements
+///
+/// After successful SSL enablement:
+/// - Nginx reload is required (handled by caller)
+/// - Site will be accessible via HTTPS on port 443
+/// - HTTP traffic will redirect to HTTPS
+/// - SSL certificates will auto-renew via acme.sh cron job
+///
+/// # See Also
+///
+/// * [`ssl::generate_ssl`] - Core SSL certificate generation logic
+/// * [`check_if_https_in_nginx_config_file`] - Checks for existing HTTPS config
+/// * [`validate_nginx_configuration`] - Validates Nginx syntax
+fn update_with_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), ()> {
+    let site_name = &nginx_config.site_name;
+    
+    // Pre-flight check: Verify SSL is not already enabled
+    // Safe to call unwrap here as ssl_root is Some when ssl is true in the config
+    let ssl_root = nginx_config.ssl_root.as_ref().unwrap();
+    
+    // Check both certificate files and nginx config for existing SSL
+    if ssl::check_if_ssl_files_exist(ssl_root) || 
+       check_if_https_in_nginx_config_file(&nginx_config.nginx_config_file_path) {
+        eprintln!("✗ SSL seems to already exist for site '{}'. Cannot update.", site_name);
+        return Err(());
+    }
+    
+    println!("Attempting to enable SSL for this site...");
+    
+    // Backup current nginx configuration for potential rollback
+    let original_nginx_config_file_content = match fs::read_to_string(&nginx_config.nginx_config_file_path) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("✗ Failed to read existing Nginx configuration file for site '{}': {}", site_name, e);
+            eprintln!("  Cannot proceed with SSL update without backup.");
+            return Err(());
+        }
+    };
+    
+    // Generate SSL certificates via Let's Encrypt
+    match ssl::generate_ssl(&nginx_config) {
+        Ok(()) => {
+            println!("✓ SSL certificates generated and installed successfully");
+            let https_config = nginx_config.generate_config(nginx::config::NginxProtocol::Https);
+            match append_to_nginx_file(&nginx_config.nginx_config_file_path, &https_config) {
+                Ok(()) => {
+                    println!("✓ Nginx configuration file updated for HTTPS successfully");
+                }
+                Err(e) => {
+                    eprintln!(
+                        "✗ Failed to update Nginx configuration file for HTTPS: {}",
+                        e
+                    );
+                    return Err(());
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("✗ SSL generation failed: {}", e);
+            return Err(());
+        }
+    }
+    
+    // Generate HTTPS server block configuration
+    let https_config = nginx_config.generate_config(nginx::config::NginxProtocol::Https);
+    
+    // Append HTTPS configuration to existing nginx config file
+    match append_to_nginx_file(&nginx_config.nginx_config_file_path, &https_config) {
+        Ok(()) => {
+            println!("✓ Nginx configuration file updated for HTTPS successfully");
+        }
+        Err(e) => {
+            eprintln!("✗ Failed to update Nginx configuration file for HTTPS: {}", e);
+            
+            // Attempt to revert to original configuration
+            println!("Attempting to revert Nginx configuration...");
+            if let Err(err) = fs::write(&nginx_config.nginx_config_file_path, &original_nginx_config_file_content) {
+                eprintln!("✗ CRITICAL: Failed to revert Nginx configuration file: {}", err);
+                eprintln!("  Manual intervention may be required to restore the configuration.");
+            }
+            return Err(());
+        }
+    }
+    
+    // Validate the updated nginx configuration
+    if let Err(e) = validate_nginx_configuration() {
+        eprintln!("✗ Nginx configuration validation failed after SSL update: {}", e);
+        println!("Attempting to revert Nginx configuration...");
+        
+        // Revert to backed up configuration
+        if let Err(err) = fs::write(&nginx_config.nginx_config_file_path, original_nginx_config_file_content) {
+            eprintln!("✗ CRITICAL: Failed to revert Nginx configuration file: {}", err);
+            eprintln!("  The Nginx configuration may be in an invalid state.");
+            eprintln!("  Manual intervention required to fix the configuration.");
+        } else {
+            println!("✓ Successfully reverted Nginx configuration to original state");
+        }
+        return Err(());
+    }
+    
+    println!("✓ SSL successfully enabled for site '{}'", site_name);
+    Ok(())
+}
