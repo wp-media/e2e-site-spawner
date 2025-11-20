@@ -29,7 +29,7 @@ use crate::nginx::{self, reload_nginx, check_if_https_in_nginx_config_file};
 use crate::nginx::{append_to_nginx_file, create_nginx_file};
 use crate::utils::db;
 use crate::utils::sites::{self, check_if_site_exists, create_file_with_content_if_not_exists, get_sudo_user, put_wordpress_in_site_directory, revert_site_spawn};
-use crate::utils::ssl;
+use crate::utils::ssl::{self, remove_site_from_acme};
 use crate::utils::validators::validate_site_name;
 use std::path::Path;
 use std::{fs, process};
@@ -554,7 +554,15 @@ pub fn delete_site(site_name: &str) {
             eprintln!("✗ Failed to remove Nginx configuration file: {}", e)
         },
     }
-
+    // Remove site from acme (prevent future renewals)
+    print!("Attempting to remove site from acme (Deactivate SSL renewal)...");
+    match remove_site_from_acme(site_name) {
+        Ok(()) => println!("{}", " ok".bright_green()),
+        Err(e) => {
+            println!("{}", " failed".bright_red());
+            eprintln!("✗ Failed to remove site from acme: {}", e)
+        },
+    }
     // Remove SSL certificates
     print!("Attempting to remove SSL files...");
     // Safe to call unwrap here as ssl_root is Some when ssl is true

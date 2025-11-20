@@ -231,6 +231,50 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
     );
     Ok(())
 }
+/// Removes a site from acme.sh management.
+///
+/// This function deactivates SSL certificate renewal for the specified site
+/// by removing it from acme.sh's configuration.
+/// # Arguments
+/// * `site_name` - The domain name of the site to remove from acme.sh
+/// # Returns
+/// * `Ok(())` - If the site was successfully removed
+/// * `Err(String)` - If there was an error during removal
+/// # Example
+/// ```ignore
+/// match remove_site_from_acme("example.com") {
+///     Ok(()) => println!("Site removed from acme.sh successfully"),
+///     Err(e) => eprintln!("Failed to remove site from acme.sh: {}", e),
+/// }
+/// ```
+pub fn remove_site_from_acme(site_name: &str) -> Result<(), String> {
+
+    let remove_output = Command::new("acme.sh")
+        .args(&[
+            "--remove",
+            "-d", site_name,
+        ])
+        .output()
+        .map_err(|e| {
+            format!(
+                "Failed to execute acme.sh: {}. \
+                Please ensure acme.sh is correctly installed as root and available for sudo users: https://github.com/acmesh-official/acme.sh",
+                e
+            )
+        })?;
+    if !remove_output.status.success() {
+        let stderr = String::from_utf8_lossy(&remove_output.stderr);
+        let stdout = String::from_utf8_lossy(&remove_output.stdout);
+
+        return Err(format!(
+            "Failed to remove site {} from acme:\n\
+            Error output:\n{}{}",
+            site_name, stdout, stderr
+        ));
+    }
+
+    Ok(())
+}
 
 /// Checks if SSL certificate files exist in the specified directory.
 ///
