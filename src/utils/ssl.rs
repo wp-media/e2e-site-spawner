@@ -23,6 +23,7 @@ use colored::*;
 use std::io::{self, Write};
 use std::process::Command;
 use crate::nginx;
+use crate::utils::sites::get_sudo_user;
 
 /// Generates SSL certificates for a site using acme.sh.
 ///
@@ -178,7 +179,8 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
 
     let privkey_path = format!("{}/privkey.pem", ssl_root);
     let fullchain_path = format!("{}/fullchain.pem", ssl_root);
-
+    let current_user = get_sudo_user();
+    let reloadcmd = format!("sudo systemctl reload nginx && chown -R {}:root {}", current_user, ssl_root);
     let install_output = Command::new("acme.sh")
         .args(&[
             "--install-cert",
@@ -189,7 +191,7 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
             "--fullchain-file",
             &fullchain_path,
             "--reloadcmd",
-            "sudo systemctl reload nginx",
+            &reloadcmd,
             "--server",
             "letsencrypt",
         ])
