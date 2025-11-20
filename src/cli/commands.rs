@@ -34,6 +34,7 @@ use crate::utils::validators::validate_site_name;
 use std::path::Path;
 use std::{fs, process};
 use colored::*;
+use std::env;
 
 /// Represents the various steps involved in spawning a new site.
 /// 
@@ -383,6 +384,9 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
             );
             revert_site_spawn(site_name, &steps_completed, &nginx_config);
         });
+        // Change ownership of SSL directory to current user:root
+        let current_user = env::var("USER").unwrap_or_else(|_| "www-data".to_string());
+        sites::set_path_owner(Some(&current_user), Some("root"), ssl_root).unwrap_or(());
     }
     if !no_wp {
         println!("Installing WordPress on the site.");
