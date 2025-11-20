@@ -359,38 +359,38 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
                 revert_site_spawn(site_name, &steps_completed, &nginx_config);
             }
         }
-    }
-    match ssl::generate_ssl(&nginx_config) {
-        Ok(()) => {
-            println!("✓ SSL certificates generated and installed successfully");
-            steps_completed.push(SpawnSteps::CreateSSL);
-            let https_config = nginx_config.generate_config(nginx::config::NginxProtocol::Https);
-            match append_to_nginx_file(&nginx_config.nginx_config_file_path, &https_config) {
-                Ok(()) => {
-                    println!("✓ Nginx configuration file updated for HTTPS successfully");
-                    steps_completed.push(SpawnSteps::CreateNginxConfigWithSSL);
-                }
-                Err(e) => {
-                    eprintln!(
-                        "✗ Failed to update Nginx configuration file for HTTPS: {}",
-                        e
-                    );
-                    revert_site_spawn(site_name, &steps_completed, &nginx_config);
+        match ssl::generate_ssl(&nginx_config) {
+            Ok(()) => {
+                println!("✓ SSL certificates generated and installed successfully");
+                steps_completed.push(SpawnSteps::CreateSSL);
+                let https_config = nginx_config.generate_config(nginx::config::NginxProtocol::Https);
+                match append_to_nginx_file(&nginx_config.nginx_config_file_path, &https_config) {
+                    Ok(()) => {
+                        println!("✓ Nginx configuration file updated for HTTPS successfully");
+                        steps_completed.push(SpawnSteps::CreateNginxConfigWithSSL);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "✗ Failed to update Nginx configuration file for HTTPS: {}",
+                            e
+                        );
+                        revert_site_spawn(site_name, &steps_completed, &nginx_config);
+                    }
                 }
             }
+            Err(e) => {
+                eprintln!("✗ SSL generation failed: {}", e);
+                revert_site_spawn(site_name, &steps_completed, &nginx_config);
+            }
         }
-        Err(e) => {
-            eprintln!("✗ SSL generation failed: {}", e);
+        let _ = validate_nginx_configuration().unwrap_or_else(|e| {
+            eprintln!(
+                "✗ Nginx configuration validation failed after creating HTTPS config. \n{}",
+                e
+            );
             revert_site_spawn(site_name, &steps_completed, &nginx_config);
-        }
+        });
     }
-    let _ = validate_nginx_configuration().unwrap_or_else(|e| {
-        eprintln!(
-            "✗ Nginx configuration validation failed after creating HTTPS config. \n{}",
-            e
-        );
-        revert_site_spawn(site_name, &steps_completed, &nginx_config);
-    });
     if !no_wp {
         println!("Installing WordPress on the site.");
         
