@@ -763,7 +763,53 @@ pub fn set_path_owner(
     })?;
     Ok(())
 }
-
+/// Recursively changes ownership of all files and directories under a root path.
+///
+/// This function sets the user and/or group ownership for the specified root path
+/// and all its contents recursively. It leverages the `walkdir` crate to traverse
+/// the directory tree.
+/// # Arguments
+/// * `user` - Optional username to set as owner. If `None`, owner unchanged.
+/// * `group` - Optional group name to set. If `None`, group unchanged.
+/// * `root` - The root directory path to start the ownership change.
+/// # Returns
+/// * `Ok(())` if ownership change was successful for all items
+/// * `Err(FileCreationError)` if any operation failed
+/// # Examples
+/// ```ignore
+/// // Change ownership of /var/www/mysite and all its contents to www-data:www-data
+/// set_path_owner_recursive(Some("www-data"), Some("www-data"), "/var/www/mysite")?;
+/// ```
+/// # Errors
+/// Returns `FileCreationError::PermissionSetFailed` if:
+/// - Specified user or group doesn't exist
+/// - Insufficient privileges to change ownership
+/// - Any file or directory operation fails during traversal
+/// # System Requirements
+/// - Unix/Linux system (uses POSIX chown)
+/// - Sufficient privileges (typically requires root for changing to different user)
+/// - Target user and group must exist in system
+/// # Security Notes
+/// Changing file ownership can affect access control. Ensure:
+/// - Web files are owned by appropriate web server user
+/// - Sensitive files have restricted ownership
+/// - Group ownership aligns with collaboration needs
+/// # Implementation Details
+/// Utilizes `walkdir::WalkDir` for efficient recursive traversal of directories.
+pub fn set_path_owner_recursive(
+    user_name: Option<&str>,
+    group_name: Option<&str>,
+    path: &str,
+) -> Result<(), FileCreationError> {
+    set_path_owner(user_name, group_name, path)?;
+    for entry in walkdir::WalkDir::new(path) {
+        let walk_path = entry.map_err(|e| {
+            FileCreationError::PermissionSetFailed(format!("Walk error at {}: {}", path, e))
+        })?;
+        set_path_owner(user_name, group_name, walk_path.path().to_str().unwrap_or(path))?;
+    }
+    Ok(())
+}
 /// Retrieves the effective sudo user or falls back to the current user.
 ///
 /// This function checks the `SUDO_USER` environment variable to determine

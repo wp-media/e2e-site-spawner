@@ -307,7 +307,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
     match sites::create_directory_if_not_exists(nginx_config.root.as_str(), Some(0o777)) {
         Ok(()) => {
             // Change ownership of Sites directory www-data:root
-            if sites::set_path_owner(Some("www-data"), Some("root"), nginx_config.root.as_str())
+            if sites::set_path_owner_recursive(Some("www-data"), Some("root"), nginx_config.root.as_str())
                 .is_err()
             {
                 eprintln!("✗ Failed to set Sites directory ownership.");
@@ -385,7 +385,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         });
         // Change ownership of SSL directory to current user:root
         let current_user = get_sudo_user();
-        sites::set_path_owner(Some(&current_user), Some("root"), ssl_root).unwrap_or(());
+        sites::set_path_owner_recursive(Some(&current_user), Some("root"), ssl_root).unwrap_or(());
     }
     if !no_wp {
         println!("Installing WordPress on the site.");
