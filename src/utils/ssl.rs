@@ -411,9 +411,6 @@ pub fn print_ssl_warning(site_name: &str) {
         site_name
     );
     println!("• DNS propagation must be complete");
-    println!("\nIf SSL generation fails:");
-    println!("• The site will still be created with HTTP-only access");
-    println!("• You can add SSL later");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 }
 
@@ -482,9 +479,6 @@ pub fn ask_for_ssl_confirmation(site_name: &str) -> bool {
         site_name
     );
     println!("• DNS propagation must be complete");
-    println!("\nIf SSL generation fails:");
-    println!("• The site will still be created with HTTP-only access");
-    println!("• You can add SSL later");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     print!("\nDo you want to continue with SSL? [y/N]: ");
