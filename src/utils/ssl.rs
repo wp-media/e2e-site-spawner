@@ -22,8 +22,9 @@
 use colored::*;
 use std::io::{self, Write};
 use std::process::Command;
-
+use std::env;
 use crate::nginx;
+use crate::utils::sites;
 
 /// Generates SSL certificates for a site using acme.sh.
 ///
@@ -228,7 +229,11 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
         "  • Auto-renewal: {}",
         "Enabled via acme.sh cron".bright_green()
     );
-
+    // Change ownership of SSL directory to current user:root
+    let current_user = env::var("USER").unwrap_or_else(|_| "www-data".to_string());
+    sites::set_path_owner(Some(&current_user), Some("root"), ssl_root).map_err(|e| {
+        format!("Failed to set SSL directory ownership: {}", e)
+    })?;
     Ok(())
 }
 

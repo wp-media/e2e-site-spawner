@@ -31,7 +31,6 @@ use crate::utils::db;
 use crate::utils::sites::{self, create_file_with_content_if_not_exists, revert_site_spawn, check_if_site_exists, put_wordpress_in_site_directory};
 use crate::utils::ssl;
 use crate::utils::validators::validate_site_name;
-use std::env;
 use std::path::Path;
 use std::{fs, process};
 use colored::*;
@@ -345,13 +344,6 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         // Create SSL directory
         match sites::create_directory_if_not_exists(ssl_root, Some(0o750)) {
             Ok(()) => {
-                // Change ownership of SSL directory to current user:root
-                let current_user = env::var("USER").unwrap_or_else(|_| "www-data".to_string());
-                if sites::set_path_owner(Some(&current_user), Some("root"), ssl_root).is_err() {
-                    eprintln!("✗ Failed to set SSL directory ownership.");
-                    sites::remove_directory(ssl_root).unwrap_or(());
-                    revert_site_spawn(site_name, &steps_completed, &nginx_config);
-                }
                 println!("✓ SSL directory created successfully");
                 steps_completed.push(SpawnSteps::CreateSSLDirectory);
             }
