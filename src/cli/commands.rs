@@ -514,16 +514,17 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
 /// * [`deactivate_site`] - To temporarily disable without deletion
 pub fn delete_site(site_name: &str) {
     println!("Preparing to delete site: {}", site_name);
-    println!("Validating Nginx configuration...");
+    print!("Validating Nginx configuration...");
     
     // Ensure Nginx is healthy before making changes
     validate_nginx_configuration().unwrap_or_else(|e| {
+        println!("{}", " failed".bright_red());
         eprintln!("✗ Nginx configuration validation failed before deletion.");
         eprintln!("Make sure Nginx configuration is okay before deleting a site, since nginx reloads is required.");
         eprintln!("Nginx error: \n{}", e);
         process::exit(1);
     });
-    
+    println!("{}", " ok".bright_green());
     // Create config object to get paths
     let nginx_config = nginx::config::NginxConfig::new(
         site_name.to_string(),
