@@ -34,30 +34,67 @@ CLI for provisioning and managing WordPress or static sites on the QA LNMP serve
 
 ## Installation
 
-Install Rust by following the instructions at [rust-lang.org](https://www.rust-lang.org/tools/install), then install the CLI with Cargo:
+Install Rust by following the instructions at [rust-lang.org](https://www.rust-lang.org/tools/install), then build and install the CLI:
 
 ```bash
 git clone <repository-url>
 cd e2e-site-spawner
-cargo install --path .
+
+# Build and install to /usr/local/bin for system-wide access
+cargo build --release
+sudo cp target/release/e2sp /usr/local/bin/
+sudo chown root:root /usr/local/bin/e2sp
+sudo chmod 755 /usr/local/bin/e2sp
 ```
 
-The command above compiles in release mode and installs the `e2sp` binary into `~/.cargo/bin`. Ensure that directory is present in your `PATH` when running under `sudo` (e.g., `sudo env "PATH=$PATH" e2sp --help`).
+The binary is now available system-wide and can be run with `sudo e2sp` without PATH issues.
 
-### Upgrading / uninstalling
+### Alternative: Install to custom location
 
-- Upgrade to the latest commit:
+If you prefer to use Cargo's install mechanism:
 
-  ```bash
-  git pull
-  cargo install --path .
-  ```
+```bash
+# Install to a temporary location
+cargo install --path . --root /tmp/e2sp-install
 
-- Remove the binary:
+# Copy to system location
+sudo cp /tmp/e2sp-install/bin/e2sp /usr/local/bin/
+sudo chown root:root /usr/local/bin/e2sp
+sudo chmod 755 /usr/local/bin/e2sp
 
-  ```bash
-  cargo uninstall e2e-site-spawner
-  ```
+# Clean up temporary files
+rm -rf /tmp/e2sp-install
+```
+
+### Upgrading
+
+To upgrade to the latest version:
+
+```bash
+cd e2e-site-spawner
+git pull
+
+# Rebuild and replace the binary
+cargo build --release
+sudo cp target/release/e2sp /usr/local/bin/
+sudo chown root:root /usr/local/bin/e2sp
+sudo chmod 755 /usr/local/bin/e2sp
+```
+
+### Uninstalling
+
+To remove the binary:
+
+```bash
+sudo rm /usr/local/bin/e2sp
+```
+
+If you originally installed with `cargo install --path .` to your user directory:
+
+```bash
+# Also remove from user's cargo bin if it exists there
+cargo uninstall e2e-site-spawner
+```
 
 ## Usage
 
