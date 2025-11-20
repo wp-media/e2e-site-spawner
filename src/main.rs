@@ -62,7 +62,7 @@ fn main() {
         let ssl = matches.get_flag("ssl");
         if ssl && !check_if_acme_sh_installed() {
             println!(
-                "{} 'acme.sh' is not installed or not available for root / sudo. SSL generation requires 'acme.sh' to be installed as root.",
+                "{} 'acme.sh' is not installed or not available for root / sudo. SSL generation requires 'acme.sh' to be installed as root. (Make sure to create symlink as well: 'sudo ln -sf \"/root/acme.sh\" /usr/local/bin/acme.sh')",
                 "❌".bright_yellow()
             );
             println!("");

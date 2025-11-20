@@ -181,7 +181,7 @@ Test doubles for nginx/MySQL are not provided—tests interact with the real sys
 ## Troubleshooting
 
 - **"ELEVATED PRIVILEGES REQUIRED"** – rerun the command with `sudo` (or as root). The CLI prints the exact command to copy/paste.
-- **`acme.sh` missing** – install it from <https://github.com/acmesh-official/acme.sh> as root / sudo or omit `--ssl`.
+- **`acme.sh` missing** – install it from <https://github.com/acmesh-official/acme.sh> as root / sudo or omit `--ssl`. And make sure create a symlink to be accesible globaly by all users, so, `sudo acme.sh..` work. You can do it with: `sudo ln -sf "/root/acme.sh" /usr/local/bin/acme.sh`
 - **Nginx validation failures** – inspect `nginx -t` output. The tool cancels the operation if validation fails before or after file changes.
 - **Database errors** – ensure the MySQL root user can create databases without a password or update `src/constants.rs` to match your environment.
 
