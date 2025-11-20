@@ -156,7 +156,7 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
                 "  {} Certificate already exists, skipping issuance",
                 "ℹ️".bright_yellow()
             );
-        } else if stderr.contains("Domains not changed") {
+        } else if stderr.contains("Domains not changed") || stdout.contains("Domains not changed") {
             println!(
                 "  {} Domain verification skipped (no changes detected)",
                 "ℹ️".bright_yellow()
