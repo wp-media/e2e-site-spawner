@@ -331,7 +331,12 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         );
         revert_site_spawn(site_name, &steps_completed, &nginx_config);
     });
-    
+
+    // Nginx reload is needed for the site to be accessible at least by HTTP (Required for SSL generation)
+    reload_nginx().unwrap_or_else(|e| {
+        eprintln!("✗ Failed to reload Nginx: {}", e);
+        revert_site_spawn(site_name, &steps_completed, &nginx_config);
+    });
     // Phase 4: SSL setup (if enabled)
     if let Some(ssl_root) = &nginx_config.ssl_root {
         println!("SSL will be enabled for this site.");
