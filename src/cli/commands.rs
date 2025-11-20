@@ -538,35 +538,47 @@ pub fn delete_site(site_name: &str) {
     });
     
     // Attempt to remove all resources (continue on failure)
-    println!("Attempting to delete site resources...");
+    print!("Attempting to delete site resources...");
     
     // Remove site directory
     match sites::remove_directory(nginx_config.root.as_str()) {
-        Ok(()) => print!("{}", " ok".bright_green()),
-        Err(e) => eprintln!("✗ Failed to remove site directory: {}", e),
+        Ok(()) => println!("{}", " ok".bright_green()),
+        Err(e) => {
+            println!("{}", " failed".bright_red());
+            eprintln!("✗ Failed to remove site directory: {}", e)
+        },
     }
 
     // Remove Nginx configuration
-    println!("Attempting to remove Nginx configuration...");
+    print!("Attempting to remove Nginx configuration...");
     match sites::remove_file(nginx_config.nginx_config_file_path.as_str()) {
-        Ok(()) => print!("{}", " ok".bright_green()),
-        Err(e) => eprintln!("✗ Failed to remove Nginx configuration file: {}", e),
+        Ok(()) => println!("{}", " ok".bright_green()),
+        Err(e) => {
+            println!("{}", " failed".bright_red());
+            eprintln!("✗ Failed to remove Nginx configuration file: {}", e)
+        },
     }
 
     // Remove SSL certificates
-    println!("Attempting to remove SSL files...");
+    print!("Attempting to remove SSL files...");
     // Safe to call unwrap here as ssl_root is Some when ssl is true
     match sites::remove_directory(nginx_config.ssl_root.as_ref().unwrap()) {
-        Ok(()) => print!("{}", " ok".bright_green()),
-        Err(e) => eprintln!("✗ Failed to remove SSL directory: {}", e),
+        Ok(()) => println!("{}", " ok".bright_green()),
+        Err(e) => {
+            println!("{}", " failed".bright_red());
+            eprintln!("✗ Failed to remove SSL directory: {}", e)
+        },
     };
     
     // Drop database
     let db_name = db::create_db_name(site_name);
-    println!("Attempting to drop database '{}'...", db_name);
+    print!("Attempting to drop database '{}'...", db_name);
     match db::drop_database(&db_name) {
-        Ok(()) => print!("{}", " ok".bright_green()),
-        Err(e) => eprintln!("✗ Failed to delete database: {}", e),
+        Ok(()) => println!("{}", " ok".bright_green()),
+        Err(e) => {
+            println!("{}", " failed".bright_red());
+            eprintln!("✗ Failed to drop database '{}': {}", db_name, e)
+        },
     }
     
     // Validate configuration after changes
