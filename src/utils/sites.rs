@@ -32,6 +32,7 @@ use crate::utils::db;
 use crate::utils::sites;
 use nix::unistd::Group;
 use rand::Rng;
+use std::env;
 
 /// Error type for file creation operations.
 ///
@@ -761,6 +762,37 @@ pub fn set_path_owner(
         FileCreationError::PermissionSetFailed(format!("Cannot set ownership on '{}': {}", path, e))
     })?;
     Ok(())
+}
+
+/// Retrieves the effective sudo user or falls back to the current user.
+///
+/// This function checks the `SUDO_USER` environment variable to determine
+/// the original user who invoked sudo. If `SUDO_USER` is not set, it
+/// falls back to the `USER` environment variable. If neither is set,
+/// it defaults to "root".
+///# Returns
+/// * A `String` representing the effective user name.
+/// # Examples
+/// ```ignore
+/// let user = get_sudo_user();
+/// println!("Effective user: {}", user);
+/// ```
+/// # Notes
+/// - Useful for scripts that need to know the original user context
+///   when run with elevated privileges.
+/// - Ensures a sensible default ("root") if no user information is available.
+///
+/// # Security Considerations
+/// - Be cautious when using this value for permission-sensitive operations.
+/// - Always validate user context in security-critical applications.
+pub fn get_sudo_user() -> String {
+    let mut user = env::var("SUDO_USER")
+        .or_else(|_| env::var("USER"))
+        .unwrap_or_else(|_| "root".to_string());
+    if user.is_empty() {
+        user = "root".to_string();
+    }
+    user
 }
 
 /// Removes a directory and all its contents recursively.

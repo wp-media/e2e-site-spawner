@@ -29,7 +29,7 @@ CLI for provisioning and managing WordPress or static sites on the QA LNMP serve
 
 ### SSL requirements
 
-- [`acme.sh`](https://github.com/acmesh-official/acme.sh) must be installed and in `$PATH` for any `--ssl` or `update --ssl` operation. The tool checks `acme.sh --version` before continuing.
+- [`acme.sh`](https://github.com/acmesh-official/acme.sh) must be installed as root / sudo and in `$PATH` for any `--ssl` or `update --ssl` operation. The tool checks `acme.sh --version` before continuing.
 - DNS must already point the requested domain to the server and port 80 must be reachable for the HTTP-01 challenge.
 
 ## Installation
@@ -181,7 +181,7 @@ Test doubles for nginx/MySQL are not provided—tests interact with the real sys
 ## Troubleshooting
 
 - **"ELEVATED PRIVILEGES REQUIRED"** – rerun the command with `sudo` (or as root). The CLI prints the exact command to copy/paste.
-- **`acme.sh` missing** – install it from <https://github.com/acmesh-official/acme.sh> or omit `--ssl`.
+- **`acme.sh` missing** – install it from <https://github.com/acmesh-official/acme.sh> as root / sudo or omit `--ssl`.
 - **Nginx validation failures** – inspect `nginx -t` output. The tool cancels the operation if validation fails before or after file changes.
 - **Database errors** – ensure the MySQL root user can create databases without a password or update `src/constants.rs` to match your environment.
 

@@ -62,7 +62,7 @@ fn main() {
         let ssl = matches.get_flag("ssl");
         if ssl && !check_if_acme_sh_installed() {
             println!(
-                "{} 'acme.sh' is not installed. SSL generation requires 'acme.sh' to be installed.",
+                "{} 'acme.sh' is not installed or not available for root / sudo. SSL generation requires 'acme.sh' to be installed as root.",
                 "❌".bright_yellow()
             );
             println!("");

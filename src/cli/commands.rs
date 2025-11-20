@@ -28,13 +28,12 @@ use crate::nginx::config::validate_nginx_configuration;
 use crate::nginx::{self, reload_nginx, check_if_https_in_nginx_config_file};
 use crate::nginx::{append_to_nginx_file, create_nginx_file};
 use crate::utils::db;
-use crate::utils::sites::{self, create_file_with_content_if_not_exists, revert_site_spawn, check_if_site_exists, put_wordpress_in_site_directory};
+use crate::utils::sites::{self, check_if_site_exists, create_file_with_content_if_not_exists, get_sudo_user, put_wordpress_in_site_directory, revert_site_spawn};
 use crate::utils::ssl;
 use crate::utils::validators::validate_site_name;
 use std::path::Path;
 use std::{fs, process};
 use colored::*;
-use std::env;
 
 /// Represents the various steps involved in spawning a new site.
 /// 
@@ -385,7 +384,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
             revert_site_spawn(site_name, &steps_completed, &nginx_config);
         });
         // Change ownership of SSL directory to current user:root
-        let current_user = env::var("USER").unwrap_or_else(|_| "www-data".to_string());
+        let current_user = get_sudo_user();
         sites::set_path_owner(Some(&current_user), Some("root"), ssl_root).unwrap_or(());
     }
     if !no_wp {
