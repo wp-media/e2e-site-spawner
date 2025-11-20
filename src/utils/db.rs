@@ -255,7 +255,8 @@ pub fn create_wordpress_database(db_name: &str, should_retry: bool) -> Result<St
 /// Creates a connection to MySQL/MariaDB server.
 ///
 /// Establishes a connection using the provided configuration parameters.
-/// Prefers Unix socket connections for localhost for better performance.
+/// For root user connections, uses Unix socket authentication which is
+/// the default on modern MySQL/MariaDB installations.
 ///
 /// # Arguments
 ///
@@ -268,38 +269,83 @@ pub fn create_wordpress_database(db_name: &str, should_retry: bool) -> Result<St
 ///
 /// # Connection Strategy
 ///
-/// - For localhost connections: Prefers Unix socket (faster)
-/// - For remote connections: Uses TCP/IP
-/// - Supports both password and passwordless authentication
+/// - For root user: Uses Unix socket authentication (no password)
+/// - For other users: Uses TCP/IP with password authentication
+/// - Socket path auto-detection for different systems
 ///
-/// # Examples
+/// # Unix Socket Authentication
 ///
-/// ```ignore
-/// use crate::utils::db::{DbConfig, create_connection};
-///
-/// let config = DbConfig::default();
-/// match create_connection(&config) {
-///     Ok(mut conn) => println!("Connected to database"),
-///     Err(e) => eprintln!("Connection failed: {}", e),
-/// }
-/// ```
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - MySQL/MariaDB server is not running
-/// - Authentication fails
-/// - Network issues prevent connection
-/// - Unix socket file doesn't exist or lacks permissions
+/// Modern MySQL/MariaDB installations use unix_socket/auth_socket plugin
+/// for root by default. This requires:
+/// - Process must run as system root (via sudo)
+/// - Connection via Unix socket (not TCP)
+/// - No password needed (OS user verification)
 fn create_connection(config: &DbConfig) -> Result<Conn, DbError> {
-    let opts = OptsBuilder::new()
-        .ip_or_hostname(Some(&config.host))
-        .tcp_port(config.port)
-        .user(Some(&config.user))
-        .pass(config.password.as_deref())
-        .prefer_socket(true); // Use Unix socket if available (faster for localhost)
-
-    Conn::new(opts).map_err(|e| DbError::ConnectionError(e.to_string()))
+    // For root user, use Unix socket authentication
+    if config.user == "root" {
+        // Try common socket paths
+        let socket_paths = vec![
+            "/var/run/mysqld/mysqld.sock",     // Ubuntu/Debian default
+            "/tmp/mysql.sock",                  // macOS default
+            "/var/lib/mysql/mysql.sock",       // CentOS/RHEL default
+            "/var/run/mysql/mysql.sock",       // Alternative path
+        ];
+        
+        // Find the first existing socket
+        let socket_path = socket_paths
+            .iter()
+            .find(|path| std::path::Path::new(path).exists());
+        
+        match socket_path {
+            Some(socket) => {
+                // Use socket authentication for root
+                let opts = OptsBuilder::new()
+                    .socket(Some(*socket))
+                    .user(Some(&config.user))
+                    // No password needed for socket auth
+                    .db_name(None::<String>);
+                
+                Conn::new(opts).map_err(|e| {
+                    // Provide helpful error message
+                    if e.to_string().contains("Access denied") {
+                        DbError::ConnectionError(format!(
+                            "Access denied for root@localhost. Make sure you're running with 'sudo'. Error: {}",
+                            e
+                        ))
+                    } else {
+                        DbError::ConnectionError(e.to_string())
+                    }
+                })
+            }
+            None => {
+                // Fallback to TCP connection if no socket found
+                // This will likely fail with modern MySQL/MariaDB but provides better error
+                let opts = OptsBuilder::new()
+                    .ip_or_hostname(Some(&config.host))
+                    .tcp_port(config.port)
+                    .user(Some(&config.user))
+                    .pass(config.password.as_deref());
+                
+                Conn::new(opts).map_err(|e| {
+                    DbError::ConnectionError(format!(
+                        "Failed to connect as root. Unix socket not found and TCP connection failed. \
+                        Make sure you're running with 'sudo' and MySQL is running. Error: {}",
+                        e
+                    ))
+                })
+            }
+        }
+    } else {
+        // For non-root users, use standard TCP connection
+        let opts = OptsBuilder::new()
+            .ip_or_hostname(Some(&config.host))
+            .tcp_port(config.port)
+            .user(Some(&config.user))
+            .pass(config.password.as_deref())
+            .prefer_socket(false); // Use TCP for non-root users
+        
+        Conn::new(opts).map_err(|e| DbError::ConnectionError(e.to_string()))
+    }
 }
 
 /// Creates a database and grants privileges to WordPress user.

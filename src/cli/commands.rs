@@ -34,6 +34,7 @@ use crate::utils::validators::validate_site_name;
 use std::env;
 use std::path::Path;
 use std::{fs, process};
+use colored::*;
 
 /// Represents the various steps involved in spawning a new site.
 /// 
@@ -540,28 +541,31 @@ pub fn delete_site(site_name: &str) {
     println!("Attempting to delete site resources...");
     
     // Remove site directory
-    let _ = sites::remove_directory(nginx_config.root.as_str()).unwrap_or_else(|e| {
-        eprintln!("✗ Failed to remove site directory: {}", e);
-    });
-    
+    match sites::remove_directory(nginx_config.root.as_str()) {
+        Ok(()) => print!("{}", " ok".bright_green()),
+        Err(e) => eprintln!("✗ Failed to remove site directory: {}", e),
+    }
+
     // Remove Nginx configuration
     println!("Attempting to remove Nginx configuration...");
-    sites::remove_file(nginx_config.nginx_config_file_path.as_str()).unwrap_or_else(|e| {
-        eprintln!("✗ Failed to remove Nginx configuration file: {}", e);
-    });
-    
+    match sites::remove_file(nginx_config.nginx_config_file_path.as_str()) {
+        Ok(()) => print!("{}", " ok".bright_green()),
+        Err(e) => eprintln!("✗ Failed to remove Nginx configuration file: {}", e),
+    }
+
     // Remove SSL certificates
     println!("Attempting to remove SSL files...");
     // Safe to call unwrap here as ssl_root is Some when ssl is true
-    sites::remove_directory(nginx_config.ssl_root.as_ref().unwrap()).unwrap_or_else(|e| {
-        eprintln!("✗ Failed to remove SSL directory: {}", e);
-    });
+    match sites::remove_directory(nginx_config.ssl_root.as_ref().unwrap()) {
+        Ok(()) => print!("{}", " ok".bright_green()),
+        Err(e) => eprintln!("✗ Failed to remove SSL directory: {}", e),
+    };
     
     // Drop database
     let db_name = db::create_db_name(site_name);
     println!("Attempting to drop database '{}'...", db_name);
     match db::drop_database(&db_name) {
-        Ok(()) => (),
+        Ok(()) => print!("{}", " ok".bright_green()),
         Err(e) => eprintln!("✗ Failed to delete database: {}", e),
     }
     
