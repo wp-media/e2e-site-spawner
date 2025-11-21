@@ -238,6 +238,10 @@ Test doubles for nginx/MySQL are not provided—tests interact with the real sys
 
 Distributed under the MIT License. See `LICENSE` for more information.
 
+## Author
+
+Sandy Figueroa: [Github](https://github.com/sandyfzu)
+
 ## Reference documentation
 
 - [Rust Book](https://doc.rust-lang.org/book/)
