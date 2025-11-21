@@ -31,6 +31,7 @@ use crate::utils::db;
 use crate::utils::sites::{self, check_if_site_exists, create_file_with_content_if_not_exists, get_sudo_user, put_wordpress_in_site_directory, revert_site_spawn};
 use crate::utils::ssl::{self, remove_site_from_acme};
 use crate::utils::validators::validate_site_name;
+use std::fs::remove_dir;
 use std::path::Path;
 use std::{fs, process};
 use colored::*;
@@ -1518,7 +1519,18 @@ fn update_with_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), ()> 
             return Err(());
         }
     };
-    
+
+        // Create SSL directory
+        match sites::create_directory_if_not_exists(ssl_root, Some(0o750)) {
+            Ok(()) => {
+                println!("✓ SSL directory created successfully");
+            }
+            Err(e) => {
+                eprintln!("✗ Failed to create SSL directory: {}", e);
+                return Err(());
+            }
+        }
+
     // Generate SSL certificates via Let's Encrypt
     match ssl::generate_ssl(&nginx_config) {
         Ok(()) => {
@@ -1533,16 +1545,22 @@ fn update_with_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), ()> 
                         "✗ Failed to update Nginx configuration file for HTTPS: {}",
                         e
                     );
+                    remove_dir(ssl_root).unwrap_or(());
                     return Err(());
                 }
             }
         }
         Err(e) => {
+     
             eprintln!("✗ SSL generation failed: {}", e);
+            remove_dir(ssl_root).unwrap_or(());
             return Err(());
         }
     }
-    
+
+    let current_user = get_sudo_user();
+    sites::set_path_owner_recursive(Some(&current_user), Some("root"), ssl_root).unwrap_or(());
+
     // Generate HTTPS server block configuration
     let https_config = nginx_config.generate_config(nginx::config::NginxProtocol::Https);
     
