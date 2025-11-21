@@ -561,20 +561,34 @@ pub fn delete_site(site_name: &str) {
     match remove_site_from_acme(site_name) {
         Ok(()) => println!("{}", " ok".bright_green()),
         Err(e) => {
-            println!("{}", " failed".bright_red());
-            eprintln!("✗ Failed to remove site from acme: {}", e)
+            if e.contains("is not an issued domain") {
+                println!("{}", " ok".bright_green());
+                println!("✓ Site was not issued by acme, skipping removal.");
+            } else {
+                println!("{}", " failed".bright_red());
+                eprintln!("✗ Failed to remove site from acme: {}", e)
+            }
         },
     }
     // Remove SSL certificates
-    print!("Attempting to remove SSL files...");
-    // Safe to call unwrap here as ssl_root is Some when ssl is true
-    match sites::remove_directory(nginx_config.ssl_root.as_ref().unwrap()) {
-        Ok(()) => println!("{}", " ok".bright_green()),
-        Err(e) => {
-            println!("{}", " failed".bright_red());
-            eprintln!("✗ Failed to remove SSL directory: {}", e)
-        },
-    };
+    {
+        // Safe to call unwrap here as ssl_root is Some when ssl is true
+        let ssl_root = &nginx_config.ssl_root.unwrap();
+        let path = Path::new(ssl_root);
+        print!("Attempting to remove SSL files...");
+        if !path.exists() {
+            println!("{}", " ok".bright_green());
+            println!("✓ No SSL directory found, skipping removal.");
+        } else {
+            match sites::remove_directory(&ssl_root) {
+                Ok(()) => println!("{}", " ok".bright_green()),
+                Err(e) => {
+                    println!("{}", " failed".bright_red());
+                    eprintln!("✗ Failed to remove SSL directory: {}", e)
+                },
+            };
+        }
+    }
     
     // Drop database
     let db_name = db::create_db_name(site_name);
