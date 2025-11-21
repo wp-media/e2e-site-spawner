@@ -163,11 +163,11 @@ Sites list:
   example.com - ssl, wp - (active)
   test-site.com - wp - (deactivated)
   static-site.com - (active)
-  old-site.com - not managed by e2sp
+  old-site.com - (active) - not managed by e2sp
 
 Summary:
-  Total sites: 4
-  Managed by e2sp: 3 (2 active, 1 deactivated)
+  Total sites: 4 (3 active, 1 deactivated)
+  Managed by e2sp: 3
   Not managed by e2sp: 1
 ```
 
