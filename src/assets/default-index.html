@@ -366,7 +366,10 @@
 
         <div class="url-box">
             <div class="url-label">Your Site URL</div>
-            <div class="url-text">!{{site_url}}!</div>
+            <div class="url-text"></div>
+            <script>
+                document.querySelector('.url-text').textContent = window.location.href;
+            </script>
         </div>
 
         <div class="features">
@@ -400,6 +403,11 @@
                 This is your default welcome page. Replace this <strong>index.html</strong> file with your own content to get started.
             </p>
             <span class="tech-badge">Created by E2E Site Spawner</span>
+            <script>
+                document.querySelector('.tech-badge')?.addEventListener('click', function() {
+                    window.open('https://github.com/wp-media/e2e-site-spawner', '_blank');
+                });
+            </script>
         </div>
     </div>
 
