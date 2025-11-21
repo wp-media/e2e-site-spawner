@@ -920,7 +920,7 @@ pub fn update_site(site_name: &str, wp: bool, ssl: bool) {
         eprintln!("✗ Site '{}' does not exist. Cannot update.", site_name);
         process::exit(1);
     }
-    if is_managed_by_this_tool(&nginx_config.nginx_config_file_path) {
+    if !is_managed_by_this_tool(&nginx_config.nginx_config_file_path) {
         eprintln!("✗ Site '{}' is not managed by e2sp. Cannot update.", site_name);
         process::exit(1);
     }
