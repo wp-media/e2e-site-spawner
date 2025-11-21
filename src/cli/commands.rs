@@ -405,7 +405,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         
         // Create database for WordPress site
         let db_name = db::create_db_name(site_name);
-
+        println!("Creating database '{}'...", db_name);
         match db::create_wordpress_database(&db_name, false) {
             Ok(db_name) => {
                 println!("✓ Database created successfully: {}", db_name);

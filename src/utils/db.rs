@@ -382,7 +382,6 @@ fn create_connection(config: &DbConfig) -> Result<Conn, DbError> {
 /// - WordPress user doesn't exist
 /// - Any SQL command fails
 fn create_database(conn: &mut Conn, db_name: &str) -> Result<(), DbError> {
-    println!("Creating database '{}'...", db_name);
     let create_query = format!(
         "CREATE DATABASE `{}` CHARACTER SET {} COLLATE {}",
         db_name, DB_CHARSET, DB_COLLATION
@@ -392,7 +391,6 @@ fn create_database(conn: &mut Conn, db_name: &str) -> Result<(), DbError> {
         .map_err(|e| DbError::from(e))?;
 
     // Grant privileges to WordPress user
-    println!("Granting privileges to WordPress user...");
     let grant_query = format!(
         "GRANT ALL PRIVILEGES ON `{}`.* TO '{}'@'{}'",
         db_name, DB_USER, DB_HOST
@@ -405,10 +403,6 @@ fn create_database(conn: &mut Conn, db_name: &str) -> Result<(), DbError> {
     conn.exec_drop("FLUSH PRIVILEGES", ())
         .map_err(|e| DbError::from(e))?;
 
-    println!(
-        "✓ Database '{}' created successfully with WordPress privileges",
-        db_name
-    );
     Ok(())
 }
 
