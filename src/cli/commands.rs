@@ -1095,18 +1095,19 @@ pub fn list_sites() {
     // Print summary
     let total = sites.len();
     let managed = sites.iter().filter(|s| s.is_managed).count();
-    let active = sites.iter().filter(|s| s.is_managed && s.is_active).count();
-    let deactivated = sites.iter().filter(|s| s.is_managed && !s.is_active).count();
+    let active = sites.iter().filter(|s| s.is_active).count();
+    let deactivated = sites.iter().filter(|s| !s.is_active).count();
     let unmanaged = sites.iter().filter(|s| !s.is_managed).count();
     
     println!("{}", "Summary:".bold());
-    println!("  Total sites: {}", total.to_string().bright_white());
+    println!("  Total sites: {} ({} active, {} deactivated)",
+        total.to_string().bright_white(),
+        active.to_string().green(),
+        deactivated.to_string().yellow());
     
     if managed > 0 {
-        println!("  Managed by e2sp: {} ({} active, {} deactivated)",
-            managed.to_string().cyan(),
-            active.to_string().green(),
-            deactivated.to_string().yellow()
+        println!("  Managed by e2sp: {}",
+            managed.to_string().cyan()
         );
     }
     
