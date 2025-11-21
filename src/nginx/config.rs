@@ -139,7 +139,7 @@ pub struct NginxConfig {
     /// 
     /// Contains the path to SSL certificates when SSL is enabled.
     /// Structure: `{SITES_SSL_PATH}/{site_name}/{site_name}`
-    /// Example: Some("/etc/nginx/ssl/example.com/example.com")
+    /// Example: Some("/etc/nginx/ssl/example.com")
     pub ssl_root: Option<String>,
 }
 
