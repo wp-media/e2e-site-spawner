@@ -23,9 +23,9 @@
 //! system instability.
 
 use crate::constants::{DB_CHARSET, DB_PASSWORD, DB_USER};
-use crate::constants::{DB_HOST, HTML_DEFAULT_INDEX_FILE, NGINX_CONF_D_PATH, SITES_PATH, NGINX_HTTP_CONFIG_MARKER, NGINX_HTTPS_CONFIG_MARKER};
+use crate::constants::{DB_HOST, HTML_DEFAULT_INDEX_FILE, NGINX_CONF_D_PATH, SITES_PATH, NGINX_HTTPS_CONFIG_MARKER};
 use crate::nginx::config::validate_nginx_configuration;
-use crate::nginx::{self, reload_nginx, check_if_https_in_nginx_config_file};
+use crate::nginx::{self, check_if_https_in_nginx_config_file, is_active_site, is_managed_by_this_tool, is_websites_config_file, reload_nginx};
 use crate::nginx::{append_to_nginx_file, create_nginx_file, get_list_of_sites_nginx_file_paths};
 use crate::utils::db;
 use crate::utils::sites::{self, check_if_site_exists, create_file_with_content_if_not_exists, get_sudo_user, put_wordpress_in_site_directory, revert_site_spawn};
@@ -904,6 +904,10 @@ pub fn update_site(site_name: &str, wp: bool, ssl: bool) {
         eprintln!("✗ Site '{}' does not exist. Cannot update.", site_name);
         process::exit(1);
     }
+    if is_managed_by_this_tool(&nginx_config.nginx_config_file_path) {
+        eprintln!("✗ Site '{}' is not managed by e2sp. Cannot update.", site_name);
+        process::exit(1);
+    }
     println!("Preparing to update site: {}", site_name);
     if wp {
         update_with_wordpress(&nginx_config).unwrap_or(());
@@ -962,7 +966,7 @@ pub fn list_sites() {
         };
         
         // Check if it's a valid nginx config with server block
-        if !content.contains("server {") {
+        if !is_websites_config_file(&file_path) {
             continue;
         }
         
@@ -974,7 +978,7 @@ pub fn list_sites() {
             .to_string();
         
         // Determine if site is active based on file extension
-        let is_active = file_name.ends_with(".conf") && !file_name.ends_with(".conf.deactivated");
+        let is_active = is_active_site(&file_path);
         
         // Extract site name by removing extensions
         let base = file_name
@@ -989,7 +993,7 @@ pub fn list_sites() {
         }
         
         // Check if managed by e2sp (contains our marker from the template)
-        let is_managed = content.contains(NGINX_HTTP_CONFIG_MARKER);
+        let is_managed = is_managed_by_this_tool(&file_path);
         if !is_managed {
             // If not managed, add with minimal info
             sites.push(SiteInfo {
@@ -997,7 +1001,7 @@ pub fn list_sites() {
                 is_managed,
                 has_ssl: false,
                 has_wordpress: false,
-                is_active: false,
+                is_active,
             });
             continue;
         }
@@ -1033,9 +1037,15 @@ pub fn list_sites() {
     // Display each site with its status
     for site in &sites {
         if !site.is_managed {
+            // Format the line based on what features exist
+            let status = if site.is_active {
+                "(active)".green()
+            } else {
+                "(deactivated)".yellow()
+            };
             // Non-e2sp managed sites
-            println!("  {} - {}",
-                site.name.bright_white(),
+            println!("  {} - {} - {}",
+                site.name.bright_white(), status,
                 "not managed by e2sp".dimmed()
             );
         } else {

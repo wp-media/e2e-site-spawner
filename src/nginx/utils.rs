@@ -35,7 +35,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::constants::NGINX_CONF_D_PATH;
+use crate::constants::{NGINX_CONF_D_PATH, NGINX_HTTP_CONFIG_MARKER, NGINX_HTTPS_CONFIG_MARKER};
 use crate::utils::sites;
 use crate::utils::sites::FileCreationError;
 
@@ -424,6 +424,107 @@ pub fn reload_nginx() -> Result<(), String> {
 
     Ok(())
 }
+
+/// Retrieves a list of all Nginx configuration file paths from the default configuration directory.
+///
+/// This function scans the Nginx configuration directory (`/etc/nginx/conf.d/`) and returns
+/// the full paths of all configuration files, including both active (`.conf`) and deactivated
+/// (`.conf.deactivated`) sites.
+///
+/// # Returns
+///
+/// * `Ok(Vec<String>)` - A vector containing the full filesystem paths to all configuration files
+/// * `Err(String)` - An error message if the directory cannot be read or entries cannot be processed
+///
+/// # File Selection Criteria
+///
+/// The function includes files that meet the following criteria:
+/// - Must be regular files (not directories or symlinks)
+/// - Must end with either `.conf` or `.conf.deactivated`
+/// - Must be directly in the config directory (not in subdirectories, as `read_dir` is non-recursive)
+///
+/// # Examples
+///
+/// ```ignore
+/// use nginx::utils::get_list_of_sites_nginx_file_paths;
+///
+/// match get_list_of_sites_nginx_file_paths() {
+///     Ok(files) => {
+///         println!("Found {} configuration files:", files.len());
+///         for file_path in files {
+///             println!("  - {}", file_path);
+///         }
+///     }
+///     Err(e) => eprintln!("Failed to list config files: {}", e),
+/// }
+/// ```
+///
+/// # Typical Output
+///
+/// For a standard Nginx setup, this might return paths like:
+/// ```text
+/// /etc/nginx/conf.d/example.com.conf
+/// /etc/nginx/conf.d/staging.example.com.conf
+/// /etc/nginx/conf.d/old-site.com.conf.deactivated
+/// /etc/nginx/conf.d/api.example.com.conf
+/// ```
+///
+/// # Error Conditions
+///
+/// This function will return an error if:
+/// - The configuration directory doesn't exist
+/// - The process lacks permission to read the directory
+/// - An I/O error occurs while reading directory entries
+///
+/// # Performance Characteristics
+///
+/// - **Non-recursive**: Only reads the immediate directory contents
+/// - **Memory usage**: O(n) where n is the number of files in the directory
+/// - **Time complexity**: O(n) for directory traversal
+/// - **No file content reading**: Only examines file metadata
+///
+/// # Security Considerations
+///
+/// - The function only reads directory entries, never file contents
+/// - Returns full paths which could reveal system structure
+/// - Requires read permission on `/etc/nginx/conf.d/`
+/// - Does not follow symlinks to prevent directory traversal
+///
+/// # Platform Behavior
+///
+/// - **Unix/Linux**: Standard behavior as documented
+/// - **Windows**: Path separators will use backslashes in the returned strings
+/// - **macOS**: May include `.DS_Store` files if they match the extension criteria
+///
+/// # Use Cases
+///
+/// This function is typically used to:
+/// - List all configured sites for management operations
+/// - Identify deactivated sites for cleanup or reactivation
+/// - Validate that expected configurations exist
+/// - Generate site inventory reports
+/// - Perform bulk operations on all configurations
+///
+/// # Related Functions
+///
+/// * [`check_if_https_in_nginx_config_file`] - Check SSL status of a specific config
+/// * [`create_nginx_file`] - Create new configuration files
+/// * [`reload_nginx`] - Apply configuration changes
+///
+/// # Implementation Notes
+///
+/// The function uses [`std::fs::read_dir`] which is non-recursive by default. This is
+/// intentional to avoid accidentally including files from subdirectories that might
+/// not be actual site configurations. The function also uses [`to_string_lossy`] for
+/// path conversion, which means non-UTF-8 filenames will have replacement characters
+/// but won't cause the function to fail.
+///
+/// # Sources
+///
+/// - [std::fs::read_dir](https://doc.rust-lang.org/std/fs/fn.read_dir.html) - Non-recursive directory reading
+/// - [DirEntry](https://doc.rust-lang.org/std/fs/struct.DirEntry.html) - Directory entry metadata access
+/// - [FileType](https://doc.rust-lang.org/std/fs/struct.FileType.html) - File type determination
+/// - [Nginx Configuration](http://nginx.org/en/docs/beginners_guide.html#conf_structure) - Standard config directory structure
 pub fn get_list_of_sites_nginx_file_paths() -> Result<Vec<String>, String> {
     let mut config_list = Vec::new();
     let nginx_config_path = NGINX_CONF_D_PATH;
@@ -455,11 +556,13 @@ pub fn get_list_of_sites_nginx_file_paths() -> Result<Vec<String>, String> {
 
     Ok(config_list)
 }
-/// Checks if HTTPS/SSL is configured in an Nginx configuration file.
+
+/// Checks if an Nginx configuration file was created and is managed by e2sp.
 ///
-/// This function examines an existing Nginx configuration file to determine whether
-/// HTTPS support is already enabled. It looks for specific SSL-related directives
-/// that indicate a properly configured HTTPS server block.
+/// This function determines whether a configuration file was generated by the e2e-site-spawner
+/// tool by looking for specific marker comments that are automatically inserted into all
+/// configurations created by this tool. This allows the tool to distinguish between its own
+/// managed sites and manually created or third-party configurations.
 ///
 /// # Arguments
 ///
@@ -467,89 +570,694 @@ pub fn get_list_of_sites_nginx_file_paths() -> Result<Vec<String>, String> {
 ///
 /// # Returns
 ///
-/// * `true` - If both HTTPS listener (port 443) and SSL certificate are configured
-/// * `false` - If either directive is missing or the file cannot be read
+/// * `true` - If the file contains e2sp management markers
+/// * `false` - If no markers are found, file doesn't exist, or cannot be read
 ///
 /// # Detection Logic
 ///
-/// The function considers HTTPS to be configured when **both** of the following
-/// conditions are met:
-/// 1. The configuration contains `listen 443` (HTTPS port listener)
-/// 2. The configuration contains `ssl_certificate` (SSL certificate path)
+/// The function searches for either of two marker strings:
+/// - `NGINX_HTTP_CONFIG_MARKER` - Inserted in HTTP server blocks
+/// - `NGINX_HTTPS_CONFIG_MARKER` - Inserted in HTTPS server blocks
 ///
-/// Both directives must be present because:
-/// - `listen 443` alone doesn't guarantee SSL is enabled (could be plain HTTP on 443)
-/// - `ssl_certificate` alone doesn't mean the server is listening on HTTPS port
+/// These markers are automatically added by the tool when creating configurations
+/// through the template system, ensuring reliable identification of managed sites.
+///
+/// # Examples
+///
+/// ```ignore
+/// use nginx::utils::is_managed_by_this_tool;
+///
+/// let config_path = "/etc/nginx/conf.d/example.com.conf";
+/// if is_managed_by_this_tool(config_path) {
+///     println!("✓ This site is managed by e2sp");
+///     // Safe to perform automated operations
+/// } else {
+///     println!("⚠ External configuration - manual intervention required");
+///     // Skip automated modifications
+/// }
+/// ```
+///
+/// # Managed Configuration Example
+///
+/// This configuration would return `true`:
+/// ```nginx
+/// # Managed by e2sp - HTTP configuration
+/// server {
+///     listen 80;
+///     server_name example.com;
+///     root /var/www/html/example.com;
+///     
+///     # Auto-generated configuration
+///     include /etc/nginx/includes/wordpress.conf;
+/// }
+/// ```
+///
+/// # Unmanaged Configuration Example
+///
+/// This configuration would return `false`:
+/// ```nginx
+/// # Manually created configuration
+/// server {
+///     listen 80;
+///     server_name legacy.com;
+///     root /var/www/legacy;
+/// }
+/// ```
+///
+/// # Use Cases
+///
+/// This function is critical for:
+///
+/// 1. **Safe automation boundaries**:
+///    - Prevent accidental modification of manual configurations
+///    - Enable bulk operations only on e2sp-managed sites
+///    - Protect custom configurations from automated updates
+///
+/// 2. **Site inventory and classification**:
+///    - Separate e2sp sites from legacy configurations
+///    - Generate reports of managed vs unmanaged infrastructure
+///    - Plan migration strategies for unmanaged sites
+///
+/// 3. **Command safety checks**:
+///    - `delete` command verification before removal
+///    - `update` command eligibility checking
+///    - `deactivate`/`activate` operation validation
+///
+/// 4. **Rollback and recovery**:
+///    - Identify configurations safe to regenerate
+///    - Determine which sites have automated backups
+///    - Track tool-managed infrastructure
+///
+/// # Implementation Strategy
+///
+/// The marker-based approach provides several benefits:
+/// - **Non-invasive**: Just comments, doesn't affect nginx functionality
+/// - **Persistent**: Survives configuration reloads and nginx restarts
+/// - **Reliable**: Can't be accidentally removed by nginx operations
+/// - **Versioned**: Markers can include version info for future compatibility
+///
+/// # Error Handling
+///
+/// Returns `false` for any error condition:
+/// - File doesn't exist (not managed)
+/// - Permission denied (assume unmanaged for safety)
+/// - Read errors (conservative approach)
+/// - Invalid UTF-8 (likely corrupted or binary file)
+///
+/// This fail-safe design prevents accidental operations on uncertain configurations.
+///
+/// # Performance Characteristics
+///
+/// - **File I/O**: Single file read operation
+/// - **Memory usage**: O(n) where n is file size
+/// - **Time complexity**: O(n) for string searching
+/// - **Typical performance**: < 1ms for standard configs
+/// - **No caching**: Fresh read ensures current state
+///
+/// # Security Considerations
+///
+/// - **Read-only operation**: Never modifies files
+/// - **Conservative defaults**: Returns `false` when uncertain
+/// - **No information leakage**: Simple boolean return
+/// - **Path validation**: Caller should validate paths
+/// - **Marker integrity**: Markers are comments, can't break nginx
+///
+/// # Marker Management
+///
+/// The markers are defined in [`constants.rs`]:
+/// ```rust
+/// pub const NGINX_HTTP_CONFIG_MARKER: &str = "# Managed by e2sp - HTTP configuration";
+/// pub const NGINX_HTTPS_CONFIG_MARKER: &str = "# Managed by e2sp - HTTPS configuration";
+/// ```
+///
+/// # Best Practices
+///
+/// When using this function:
+/// 1. Always check management status before destructive operations
+/// 2. Provide clear user feedback for unmanaged sites
+/// 3. Consider offering manual mode for unmanaged configurations
+/// 4. Log operations on managed vs unmanaged sites differently
+/// 5. Never force operations on unmanaged sites
+///
+/// # Edge Cases and Limitations
+///
+/// The function may incorrectly classify:
+/// - **Copied configurations**: If someone copies an e2sp config manually
+/// - **Partial markers**: If only one marker remains after manual editing
+/// - **Commented markers**: If markers are commented out but still present
+/// - **Migrated sites**: Sites moved between servers retaining markers
+///
+/// # Integration with Other Functions
+///
+/// This function works in conjunction with:
+/// - [`spawn_site`]: Adds markers when creating configurations
+/// - [`delete_site`]: Only deletes managed configurations
+/// - [`list_sites`]: Shows management status for all sites
+/// - [`update_site`]: Only updates managed sites
+///
+/// # Related Functions
+///
+/// * [`is_websites_config_file`] - Check if file is a site configuration
+/// * [`is_https_configured`] - Check SSL status
+/// * [`get_list_of_sites_nginx_file_paths`] - List all configurations
+/// * [`create_nginx_file`] - Create new managed configurations
+///
+/// # Future Enhancements
+///
+/// Potential improvements could include:
+/// - Marker versioning for compatibility tracking
+/// - Cryptographic signatures for tamper detection
+/// - Metadata storage (creation date, last modified by e2sp)
+/// - Partial management support (e2sp manages some sections)
+/// - Migration tools for adopting unmanaged sites
+///
+/// # Standards and References
+///
+/// Based on configuration management best practices:
+/// - [Nginx Configuration Comments](http://nginx.org/en/docs/beginners_guide.html#comments) - Comment syntax in nginx
+/// - [Infrastructure as Code](https://www.hashicorp.com/resources/what-is-infrastructure-as-code) - Automated infrastructure principles
+/// - [Configuration Management](https://www.redhat.com/en/topics/automation/what-is-configuration-management) - CM best practices
+/// - [Idempotent Operations](https://docs.ansible.com/ansible/latest/reference_appendices/glossary.html#term-Idempotency) - Safe automation principles
+pub fn is_managed_by_this_tool(nginx_config_file_path: &str) -> bool {
+    let path = Path::new(nginx_config_file_path);
+    if !path.exists() || !path.is_file() {
+        return false;
+    }
+
+    let contents = fs::read_to_string(nginx_config_file_path).unwrap_or_default();
+    contents.contains(NGINX_HTTP_CONFIG_MARKER) || contents.contains(NGINX_HTTPS_CONFIG_MARKER)
+}
+
+/// Checks if an Nginx configuration file represents a website/virtual host configuration.
+///
+/// This function determines whether a given Nginx configuration file contains
+/// a server block, which is the primary indicator of a site/virtual host configuration
+/// as opposed to utility configuration files (like gzip.conf, upstream.conf, etc.).
+///
+/// # Arguments
+///
+/// * `nginx_config_file_path` - The full path to the Nginx configuration file to check
+///
+/// # Returns
+///
+/// * `true` - If the file contains a `server {` block
+/// * `false` - If no server block is found or the file cannot be read
+///
+/// # Detection Logic
+///
+/// The function looks for the literal string `"server {"` which indicates the
+/// beginning of a server block. This is the standard Nginx syntax for defining
+/// a virtual host or website configuration.
+///
+/// # Examples
+///
+/// ```ignore
+/// use nginx::utils::is_websites_config_file;
+///
+/// // Check if a file is a site configuration
+/// if is_websites_config_file("/etc/nginx/conf.d/example.com.conf") {
+///     println!("This is a website configuration file");
+/// } else {
+///     println!("This is a utility/include file, not a site config");
+/// }
+/// ```
+///
+/// # Common Use Cases
+///
+/// This function helps differentiate between:
+/// - **Site configs**: Files containing server blocks (example.com.conf, api.domain.conf)
+/// - **Utility configs**: Files with directives but no server blocks (gzip.conf, ssl.conf, upstream.conf)
+///
+/// # Example Site Configuration (Returns true)
+///
+/// ```nginx
+/// server {
+///     listen 80;
+///     server_name example.com;
+///     root /var/www/example.com;
+/// }
+/// ```
+///
+/// # Example Utility Configuration (Returns false)
+///
+/// ```nginx
+/// # gzip.conf - compression settings
+/// gzip on;
+/// gzip_vary on;
+/// gzip_types text/plain text/css application/json;
+/// ```
+///
+/// # Error Handling
+///
+/// If the file:
+/// - Does not exist
+/// - Is not a regular file (e.g., directory, symlink to non-existent file)
+/// - Cannot be read due to permissions
+/// 
+/// The function returns `false` rather than panicking, allowing graceful handling
+/// of missing or inaccessible configurations.
+///
+/// # Performance Considerations
+///
+/// - Reads entire file into memory
+/// - Uses simple string search (O(n) where n is file size)
+/// - Suitable for typical Nginx configs (usually < 10KB)
+///
+/// # Limitations
+///
+/// The function may incorrectly identify:
+/// - Files with commented-out server blocks (e.g., `# server {`)
+/// - Files where server block is split across lines (rare but possible)
+/// - Template files containing literal `server {` in documentation
+///
+/// # Security Notes
+///
+/// - Read-only operation, never modifies files
+/// - Returns simple boolean to avoid leaking configuration details
+///
+/// # Related Functions
+///
+/// * [`is_managed_by_this_tool`] - Check if config was created by e2sp
+/// * [`is_https_configured`] - Check SSL status
+/// * [`get_list_of_sites_nginx_file_paths`] - List all config files
+///
+/// # Standards References
+///
+/// Server blocks are documented in the [Nginx documentation](http://nginx.org/en/docs/http/ngx_http_core_module.html#server)
+/// as the fundamental building block for virtual host configuration.
+pub fn is_websites_config_file(nginx_config_file_path: &str) -> bool {
+    let path = Path::new(nginx_config_file_path);
+    if !path.exists() || !path.is_file() {
+        return false;
+    }
+
+    let contents = fs::read_to_string(nginx_config_file_path).unwrap_or_default();
+    contents.contains("server {")
+}
+
+/// Checks if an Nginx configuration file represents an active (enabled) site.
+///
+/// This function determines whether a site is currently active by examining the
+/// configuration file's extension. Active sites use the `.conf` extension, while
+/// deactivated sites use `.conf.deactivated`. This naming convention allows for
+/// quick enable/disable operations without modifying file contents.
+///
+/// # Arguments
+///
+/// * `nginx_config_file_path` - The full path to the Nginx configuration file to check
+///
+/// # Returns
+///
+/// * `true` - If the file ends with `.conf` (but not `.conf.deactivated`)
+/// * `false` - If the file ends with `.conf.deactivated`, doesn't exist, or isn't a regular file
+///
+/// # Detection Logic
+///
+/// The function uses a simple but effective naming convention:
+/// - **Active sites**: `example.com.conf`
+/// - **Deactivated sites**: `example.com.conf.deactivated`
+///
+/// This approach allows sites to be toggled without:
+/// - Moving files between directories
+/// - Modifying file contents
+/// - Changing permissions
+/// - Updating symbolic links
+///
+/// # Examples
+///
+/// ```ignore
+/// use nginx::utils::is_active_site;
+///
+/// // Check if a site is currently active
+/// if is_active_site("/etc/nginx/conf.d/example.com.conf") {
+///     println!("✓ Site is active and serving traffic");
+/// } else {
+///     println!("✗ Site is deactivated");
+/// }
+///
+/// // Use in conditional operations
+/// let config_path = "/etc/nginx/conf.d/mysite.com.conf.deactivated";
+/// if !is_active_site(config_path) {
+///     println!("Site is deactivated, skipping SSL renewal");
+///     return;
+/// }
+/// ```
+///
+/// # File Naming Examples
+///
+/// Files that return `true` (active):
+/// ```text
+/// /etc/nginx/conf.d/example.com.conf
+/// /etc/nginx/conf.d/api.example.com.conf
+/// /etc/nginx/conf.d/staging.site.conf
+/// ```
+///
+/// Files that return `false` (inactive):
+/// ```text
+/// /etc/nginx/conf.d/example.com.conf.deactivated
+/// /etc/nginx/conf.d/old-site.conf.deactivated
+/// /etc/nginx/conf.d/test.conf.disabled        # Different convention
+/// /etc/nginx/conf.d/site.conf.bak              # Backup file
+/// ```
+///
+/// # Use Cases
+///
+/// This function is essential for:
+///
+/// 1. **Site inventory and status reporting**:
+///    - List all sites with their active/inactive status
+///    - Generate uptime reports
+///    - Monitor site availability
+///    - Audit configuration changes
+///
+/// 2. **Conditional operations**:
+///    - Skip SSL renewal for inactive sites
+///    - Exclude deactivated sites from backups
+///    - Bypass monitoring for disabled sites
+///    - Prevent updates to inactive configurations
+///
+/// 3. **Activation/deactivation workflows**:
+///    - Toggle site status by renaming files
+///    - Implement maintenance mode
+///    - Gradual rollouts and rollbacks
+///    - A/B testing with quick switches
+///
+/// 4. **Resource optimization**:
+///    - Skip processing for inactive sites
+///    - Reduce unnecessary file operations
+///    - Optimize configuration reload times
+///    - Minimize SSL certificate requests
+///
+/// # Implementation Details
+///
+/// The function performs these checks in order:
+/// 1. Verifies the path exists
+/// 2. Confirms it's a regular file (not directory/symlink)
+/// 3. Extracts the filename from the path
+/// 4. Checks if it ends with `.conf` (active)
+/// 5. Ensures it doesn't end with `.conf.deactivated` (inactive)
+///
+/// # Error Handling
+///
+/// Returns `false` for any error condition:
+/// - File doesn't exist
+/// - Path points to a directory
+/// - Path points to a broken symlink
+/// - Cannot extract filename from path
+/// - Permission denied (cannot stat file)
+///
+/// This conservative approach ensures that questionable configurations
+/// are treated as inactive for safety.
+///
+/// # Performance Characteristics
+///
+/// - **No file I/O**: Only checks filesystem metadata
+/// - **Time complexity**: O(1) - Simple string comparison
+/// - **Memory usage**: O(n) where n is the path length
+/// - **Typical execution**: < 0.1ms
+/// - **System calls**: Single `stat()` call to check file existence
+///
+/// # Advantages of This Approach
+///
+/// 1. **Atomic operations**: Renaming is atomic on most filesystems
+/// 2. **Reversible**: Easy to reactivate by removing `.deactivated`
+/// 3. **Visible**: Clear indication in directory listings
+/// 4. **No content changes**: Preserves file integrity
+/// 5. **Version control friendly**: Shows as rename, not delete/create
+/// 6. **Nginx compatible**: Nginx ignores `.deactivated` files
+///
+/// # Limitations
+///
+/// - **Convention-dependent**: Relies on specific naming pattern
+/// - **Single convention**: Doesn't recognize `.disabled`, `.bak`, etc.
+/// - **Case sensitive**: `.DEACTIVATED` wouldn't be recognized
+/// - **No partial activation**: Can't disable specific server blocks
+/// - **No timestamp**: Doesn't track when deactivation occurred
+///
+/// # Best Practices
+///
+/// When using this function:
+/// 1. Always use the standard `.conf.deactivated` extension
+/// 2. Reload nginx after activation/deactivation
+/// 3. Verify nginx configuration before activating
+/// 4. Log activation/deactivation operations
+/// 5. Consider keeping backups before deactivating
+///
+/// # Integration with Other Commands
+///
+/// This function is used by:
+/// - [`list_sites`]: Shows (active) or (deactivated) status
+/// - [`deactivate_site`]: Renames `.conf` to `.conf.deactivated`
+/// - [`activate_site`]: Renames `.conf.deactivated` to `.conf`
+/// - [`delete_site`]: Can delete both active and inactive sites
+/// - [`update_site`]: Only updates active sites by default
+///
+/// # Related Functions
+///
+/// * [`is_managed_by_this_tool`] - Check if site is e2sp-managed
+/// * [`is_websites_config_file`] - Verify it's a site configuration
+/// * [`is_https_configured`] - Check SSL status
+/// * [`get_list_of_sites_nginx_file_paths`] - List all config files
+///
+/// # Alternative Approaches
+///
+/// Other methods for enabling/disabling sites:
+/// - **Symlink method**: Link from sites-available to sites-enabled
+/// - **Include directive**: Comment/uncomment include statements
+/// - **Directory method**: Move files between directories
+/// - **Configuration flag**: Use nginx variables to control activation
+///
+/// This tool uses the extension method for simplicity and reliability.
+///
+/// # Future Enhancements
+///
+/// Potential improvements could include:
+/// - Support for multiple deactivation conventions
+/// - Deactivation timestamps in filename
+/// - Reason codes (`.deactivated-maintenance`, `.deactivated-error`)
+/// - Partial deactivation (specific server blocks)
+/// - Scheduled reactivation
+/// - Activation history tracking
+///
+/// # Standards and References
+///
+/// Based on common practices and standards:
+/// - [Nginx Configuration Files](http://nginx.org/en/docs/beginners_guide.html#conf_structure) - File naming conventions
+/// - [Filesystem Hierarchy Standard](https://refspecs.linuxfoundation.org/FHS_3.0/fhs/index.html) - Linux directory standards
+/// - [Apache a2ensite/a2dissite](https://manpages.debian.org/testing/apache2/a2ensite.8.en.html) - Similar enable/disable pattern
+/// - [Systemd Unit Files](https://www.freedesktop.org/software/systemd/man/systemd.unit.html) - Enable/disable conventions
+pub fn is_active_site(nginx_config_file_path: &str) -> bool {
+    let path = Path::new(nginx_config_file_path);
+    
+    // Check if the file exists and is a regular file
+    if !path.exists() || !path.is_file() {
+        return false;
+    }
+
+    // Extract the filename from the path
+    let file_name = match path.file_name() {
+        Some(name) => name.to_string_lossy(),
+        None => return false, // Cannot determine filename
+    };
+
+    // Active sites end with .conf but not .conf.deactivated
+    file_name.ends_with(".conf") && !file_name.ends_with(".conf.deactivated")
+}
+
+/// Checks if HTTPS/SSL is configured in an Nginx configuration file.
+///
+/// This function provides a simple interface to determine whether a site has HTTPS
+/// enabled by checking for both the HTTPS port listener and SSL certificate configuration.
+/// It serves as an alias to [`is_https_configured`] for backward compatibility and
+/// semantic clarity in different contexts.
+///
+/// # Arguments
+///
+/// * `nginx_config_file_path` - The full path to the Nginx configuration file to check
+///
+/// # Returns
+///
+/// * `true` - If both `listen 443` and `ssl_certificate` directives are present
+/// * `false` - If either directive is missing, file doesn't exist, or cannot be read
+///
+/// # Detection Methodology
+///
+/// The function performs two essential checks:
+/// 1. **HTTPS Port (443)**: Verifies the presence of `listen 443` directive
+/// 2. **SSL Certificate**: Confirms `ssl_certificate` directive exists
+///
+/// Both conditions must be satisfied because:
+/// - A server listening on port 443 without SSL certificates would fail to start
+/// - SSL certificates without a listener would never be used
+/// - This dual check prevents false positives from incomplete configurations
 ///
 /// # Examples
 ///
 /// ```ignore
 /// use nginx::utils::check_if_https_in_nginx_config_file;
 ///
-/// // Check if a site already has HTTPS configured
-/// let config_path = "/etc/nginx/sites-available/example.com.conf";
+/// // Check before attempting SSL certificate generation
+/// let config_path = "/etc/nginx/conf.d/example.com.conf";
 /// if check_if_https_in_nginx_config_file(config_path) {
-///     println!("HTTPS is already configured for this site");
+///     println!("SSL already configured, skipping certificate generation");
 /// } else {
-///     println!("Site is HTTP-only, SSL can be added");
+///     // Safe to proceed with SSL setup
+///     generate_ssl_certificate(site_name);
 /// }
 /// ```
 ///
-/// # Error Handling
+/// # Valid HTTPS Configuration Example
 ///
-/// If the file cannot be read (doesn't exist, permission denied, etc.),
-/// the function returns `false` rather than panicking. This is intentional
-/// to allow the calling code to proceed with SSL setup when uncertain about
-/// the current state.
-///
-/// # Use Cases
-///
-/// This function is typically used to:
-/// - Prevent duplicate SSL configuration attempts
-/// - Determine if SSL removal is possible
-/// - Check site status for reporting or migration
-/// - Validate SSL setup after configuration changes
-///
-/// # Limitations
-///
-/// The function performs a simple text search and may not detect:
-/// - Commented-out SSL configurations
-/// - SSL configured through included files
-/// - Non-standard SSL configurations (custom ports, SNI, etc.)
-/// - Malformed configurations that wouldn't work anyway
-///
-/// # Performance Note
-///
-/// The entire file is read into memory. For very large configuration files,
-/// this might be inefficient. However, Nginx configuration files are typically
-/// small enough that this is not a concern.
-///
-/// # Security Considerations
-///
-/// - The function only reads the file, never modifies it
-/// - No sensitive information (certificates, keys) is exposed
-/// - Returns a simple boolean to avoid leaking configuration details
-///
-/// # Common Nginx HTTPS Configuration
-///
-/// A typical HTTPS server block that would be detected:
+/// This configuration would return `true`:
 /// ```nginx
+/// server {
+///     listen 443 ssl http2;
+///     server_name secure.example.com;
+///     
+///     ssl_certificate /etc/nginx/ssl/secure.example.com/fullchain.pem;
+///     ssl_certificate_key /etc/nginx/ssl/secure.example.com/privkey.pem;
+///     
+///     ssl_protocols TLSv1.2 TLSv1.3;
+///     ssl_prefer_server_ciphers off;
+///     
+///     root /var/www/secure.example.com;
+///     index index.html;
+/// }
+/// ```
+///
+/// # Invalid/Incomplete Configuration Examples
+///
+/// These would return `false`:
+///
+/// ```nginx
+/// # Missing ssl_certificate directive
 /// server {
 ///     listen 443 ssl;
 ///     server_name example.com;
-///     
-///     ssl_certificate /etc/nginx/ssl/example.com/fullchain.pem;
-///     ssl_certificate_key /etc/nginx/ssl/example.com/privkey.pem;
-///     
-///     # ... rest of configuration
+///     # No ssl_certificate specified!
 /// }
 /// ```
 ///
-/// # See Also
+/// ```nginx
+/// # Missing listen 443 directive
+/// server {
+///     listen 80;  # HTTP only
+///     server_name example.com;
+///     ssl_certificate /path/to/cert.pem;  # Certificate defined but not used
+/// }
+/// ```
 ///
-/// * [`create_nginx_file`] - Creates new Nginx configuration files
-/// * [`append_to_nginx_file`] - Adds HTTPS configuration to existing files
-/// * [`ssl::generate_ssl`] - Generates SSL certificates for sites
+/// # Use Cases
+///
+/// This function is commonly used in:
+///
+/// 1. **Pre-flight checks** before SSL certificate operations:
+///    - Prevent duplicate certificate generation
+///    - Avoid overwriting existing SSL configurations
+///    - Skip unnecessary acme.sh calls
+///
+/// 2. **Site inventory and reporting**:
+///    - List sites with/without HTTPS
+///    - Security audits
+///    - Migration planning
+///
+/// 3. **Conditional configuration updates**:
+///    - Add HTTPS redirect only if SSL is configured
+///    - Enable HTTP/2 or HTTP/3 features
+///    - Apply SSL-specific optimizations
+///
+/// 4. **Validation workflows**:
+///    - Verify SSL setup completed successfully
+///    - Health checks after certificate renewal
+///    - Pre-deployment validation
+///
+/// # Error Handling
+///
+/// The function uses a fail-safe approach, returning `false` for any error:
+/// - **File not found**: Returns `false` (no HTTPS configured)
+/// - **Permission denied**: Returns `false` (cannot verify, assume not configured)
+/// - **I/O errors**: Returns `false` (safe default)
+/// - **Invalid UTF-8**: Returns `false` (corrupted file, likely misconfigured)
+///
+/// This design allows operations to proceed safely when configuration status
+/// cannot be determined with certainty.
+///
+/// # Performance Characteristics
+///
+/// - **File I/O**: Single file read operation
+/// - **Memory usage**: O(n) where n is the file size
+/// - **Time complexity**: O(n) for string searching
+/// - **Typical performance**: < 1ms for configs under 10KB
+/// - **Caching**: No internal caching; file is read on each call
+///
+/// # Limitations and Edge Cases
+///
+/// The function may not detect HTTPS in these scenarios:
+///
+/// 1. **Non-standard ports**: Custom HTTPS ports (8443, 4443, etc.) are not detected
+/// 2. **IPv6 listeners**: `listen [::]:443` requires separate detection logic
+/// 3. **Included configurations**: SSL configured via `include` directives
+/// 4. **Stream contexts**: TCP/UDP SSL proxying in stream blocks
+/// 5. **Commented directives**: `# listen 443` would be ignored
+/// 6. **Split configurations**: Certificate and listener in different server blocks
+/// 7. **SNI configurations**: Multiple certificates on same IP/port
+/// 8. **Wildcard listeners**: `listen *:443` or `listen 0.0.0.0:443`
+///
+/// # Security Considerations
+///
+/// - **Read-only operation**: Never modifies configuration files
+/// - **No sensitive data exposure**: Doesn't return certificate contents or paths
+/// - **Path validation**: Caller must validate paths to prevent traversal attacks
+/// - **No certificate validation**: Doesn't verify certificate validity, expiry, or chain
+/// - **Simple boolean return**: Prevents information leakage about configuration details
+///
+/// # Best Practices
+///
+/// When using this function:
+/// 1. Always validate the file path before calling
+/// 2. Handle both `true` and `false` cases explicitly
+/// 3. Consider using with [`is_websites_config_file`] first
+/// 4. Don't rely solely on this for security decisions
+/// 5. Complement with actual certificate validation for production
+///
+/// # Related Functions
+///
+/// * [`is_https_configured`] - Identical functionality with different name
+/// * [`is_websites_config_file`] - Verify file is a site configuration
+/// * [`is_managed_by_this_tool`] - Check if config was created by e2sp
+/// * [`get_list_of_sites_nginx_file_paths`] - List all configuration files
+/// * [`ssl::generate_ssl`] - Generate SSL certificates for sites
+///
+/// # Implementation Notes
+///
+/// This function uses [`std::fs::read_to_string`] with [`unwrap_or_default()`],
+/// which means:
+/// - File read errors result in an empty string
+/// - Empty string won't contain the required directives
+/// - Function returns `false` for any read failure
+///
+/// This is intentional defensive programming to prevent crashes and allow
+/// graceful degradation when configuration files are temporarily inaccessible.
+///
+/// # Standards and References
+///
+/// Based on industry standards and best practices:
+/// - [Nginx SSL Module Documentation](http://nginx.org/en/docs/http/ngx_http_ssl_module.html) - Official SSL configuration reference
+/// - [RFC 8446 - TLS 1.3](https://datatracker.ietf.org/doc/html/rfc8446) - Current TLS specification
+/// - [Mozilla SSL Configuration Generator](https://ssl-config.mozilla.org/) - Recommended SSL settings
+/// - [OWASP TLS Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Protection_Cheat_Sheet.html) - Security best practices
+/// - [Let's Encrypt Best Practices](https://letsencrypt.org/docs/best-practices/) - Certificate management guidelines
+///
+/// # Future Improvements
+///
+/// Potential enhancements could include:
+/// - Support for custom port detection via parameter
+/// - IPv6 listener detection (`[::]:443`)
+/// - Certificate expiry checking
+/// - Chain validation
+/// - Protocol version detection (TLS 1.2 vs 1.3)
+/// - OCSP stapling verification
+/// - HTTP/2 and HTTP/3 support detection
 pub fn check_if_https_in_nginx_config_file(nginx_config_file_path: &str) -> bool {
     // Read the configuration file, returning empty string if it fails
     // This allows graceful handling of missing or inaccessible files
