@@ -242,6 +242,8 @@ pub const REMOVE_SSL_DIRECTORY: [SpawnSteps; 2] =
 /// * [`delete_site`] - To remove a created site
 /// * [`deactivate_site`] - To temporarily disable a site
 pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
+    println!("Preparing to create site: {}", site_name);
+    println!("");
     // Phase 1: Pre-validation
     validate_nginx_configuration().unwrap_or_else(|e| {
         eprintln!("✗ Nginx configuration validation failed before spawning a new site.");
@@ -249,17 +251,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         eprintln!("Nginx error: \n{}", e);
         process::exit(1);
     });
-    
-    if ssl {
-        ssl::print_ssl_warning(site_name);
-    }
-    
-    println!("Preparing to create site: {}", site_name);
-    if no_wp {
-        println!("WordPress will not be installed on this site.");
-    } else {
-        println!("WordPress will be installed on this site.");
-    }
+
 
     if !validate_site_name(site_name) {
         eprintln!("✗ Invalid site name: {}", site_name);
@@ -284,7 +276,17 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         eprintln!("✗ Validation failed: {}", e);
         process::exit(1);
     });
-    
+
+    if ssl {
+        ssl::print_ssl_warning(site_name);
+    }
+
+    if no_wp {
+        println!("WordPress will not be installed on this site.");
+    } else {
+        println!("WordPress will be installed on this site.");
+    }
+
     // Phase 2: Create HTTP configuration
     match create_nginx_file(
         nginx_config.nginx_config_file_path.as_str(),
