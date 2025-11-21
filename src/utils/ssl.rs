@@ -138,9 +138,9 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
     if !issue_output.status.success() {
         let stderr = String::from_utf8_lossy(&issue_output.stderr);
         let stdout = String::from_utf8_lossy(&issue_output.stdout);
-
+        let full_output = format!("{}{}", stdout, stderr);
         // Check for common errors
-        if stderr.contains("Verify error") || stdout.contains("Verify error") {
+        if full_output.contains("Verify error") {
             return Err(format!(
                 "Domain verification failed for '{}'.\n\
                 Please ensure:\n\
@@ -151,12 +151,17 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
                 Error output:\n{}",
                 site_name, webroot, stderr
             ));
-        } else if stderr.contains("already exists") || stdout.contains("already exists") {
+        } else if full_output.contains("already exists") {
             println!(
                 "  {} Certificate already exists, skipping issuance",
                 "ℹ️".bright_yellow()
             );
-        } else if stderr.contains("Domains not changed") || stdout.contains("Domains not changed") {
+        } else if full_output.contains("Domain key exists, do you want to overwrite it?") {
+            println!(
+                "  {} Certificate already exists, skipping issuance",
+                "ℹ️".bright_yellow()
+            );
+        } else if full_output.contains("Domains not changed") {
             println!(
                 "  {} Domain verification skipped (no changes detected)",
                 "ℹ️".bright_yellow()
