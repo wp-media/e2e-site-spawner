@@ -128,7 +128,7 @@ pub fn build_cli() -> Command {
 
     Command::new("E2E Site Spawner")
         .styles(styles)
-        .color(ColorChoice::Auto) // Auto-detect terminal color support
+        .color(ColorChoice::Auto)
         .version(VERSION)
         .author(env!("CARGO_PKG_AUTHORS"))
         .about("CLI tool for managing Nginx sites on the e2e server")
@@ -204,34 +204,51 @@ pub fn build_cli() -> Command {
                         .index(1),
                 ),
         )
-    .subcommand(
-        Command::new("update")
-            .about("Modifies an existing site's configuration")
-            .long_about("Updates an existing site by adding WordPress and/or SSL support")
-            .after_help("EXAMPLES:\n    \
-                e2sp update example.e2e.rocketlabsqa.ovh --wp       # Add WordPress to a static site\n    \
-                e2sp update example.e2e.rocketlabsqa.ovh --ssl      # Add SSL certificate to HTTP-only site\n    \
-                e2sp update example.e2e.rocketlabsqa.ovh --wp --ssl # Add both WordPress and SSL")
-            .arg(
-                Arg::new("site_name")
-                    .help("The name of the site to update (e.g., example.e2e.rocketlabsqa.ovh)")
-                    .required(true)
-                    .value_name("SITE_NAME")
-                    .index(1),
-            )
-            .arg(
-                Arg::new("wp")
-                    .long("wp")
-                    .help("Install WordPress on an existing non-WP site")
-                    .action(clap::ArgAction::SetTrue),
-            )
-            .arg(
-                Arg::new("ssl")
-                    .long("ssl")
-                    .help("Add SSL certificate to an HTTP-only site")
-                    .action(clap::ArgAction::SetTrue),
-            ),
-    )
+        .subcommand(
+            Command::new("update")
+                .about("Modifies an existing site's configuration")
+                .long_about("Updates an existing site by adding WordPress and/or SSL support")
+                .after_help("EXAMPLES:\n    \
+                    e2sp update example.e2e.rocketlabsqa.ovh --wp       # Add WordPress to a static site\n    \
+                    e2sp update example.e2e.rocketlabsqa.ovh --ssl      # Add SSL certificate to HTTP-only site\n    \
+                    e2sp update example.e2e.rocketlabsqa.ovh --wp --ssl # Add both WordPress and SSL")
+                .arg(
+                    Arg::new("site_name")
+                        .help("The name of the site to update (e.g., example.e2e.rocketlabsqa.ovh)")
+                        .required(true)
+                        .value_name("SITE_NAME")
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("wp")
+                        .long("wp")
+                        .help("Install WordPress on an existing non-WP site")
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("ssl")
+                        .long("ssl")
+                        .help("Add SSL certificate to an HTTP-only site")
+                        .action(clap::ArgAction::SetTrue),
+                ),
+        )
+        .subcommand(
+            Command::new("list")
+                .about("Lists all configured sites on the server")
+                .long_about("Displays a comprehensive list of all sites configured on this server, showing their status, \
+                            SSL configuration, WordPress installation, and other relevant details")
+                .after_help("EXAMPLES:\n    \
+                    e2sp list                  # Show all configured sites\n\n\
+                    OUTPUT FORMAT:\n    \
+                    The list shows each site with:\n    \
+                    • Site name (domain)\n    \
+                    • Status (active/inactive)\n    \
+                    • SSL enabled (yes/no)\n    \
+                    • WordPress installed (yes/no)\n    \
+                    • Site path\n\n\
+                    NOTES:\n    \
+                    Sites are detected by scanning Nginx configuration files in /etc/nginx/conf.d/")
+        )
     // .subcommand(
     //     Command::new("help")
     //         .about("Displays help information")

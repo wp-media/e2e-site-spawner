@@ -35,6 +35,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use crate::constants::NGINX_CONF_D_PATH;
 use crate::utils::sites;
 use crate::utils::sites::FileCreationError;
 
@@ -423,7 +424,37 @@ pub fn reload_nginx() -> Result<(), String> {
 
     Ok(())
 }
+pub fn get_list_of_sites_nginx_file_paths() -> Result<Vec<String>, String> {
+    let mut config_list = Vec::new();
+    let nginx_config_path = NGINX_CONF_D_PATH;
 
+    let entries = fs::read_dir(nginx_config_path)
+        .map_err(|e| format!("Failed to read Nginx config directory: {}", e))?;
+
+    for entry_res in entries {
+        let entry = entry_res.map_err(|e| format!("Failed to read dir entry: {}", e))?;
+        // Only consider immediate entries (read_dir is non-recursive)
+        match entry.file_type() {
+            Ok(ft) if ft.is_file() => {
+                // Accept files ending with ".conf" or ".conf.deactivated"
+                let file_name = entry.file_name();
+                let file_name_str = file_name.to_string_lossy();
+
+                if !(file_name_str.ends_with(".conf") || file_name_str.ends_with(".conf.deactivated")) {
+                    continue;
+                }
+
+                config_list.push(file_name_str.into_owned());
+            }
+            _ => {
+                // skip directories, symlinks to dirs, etc.
+                continue;
+            }
+        }
+    }
+
+    Ok(config_list)
+}
 /// Checks if HTTPS/SSL is configured in an Nginx configuration file.
 ///
 /// This function examines an existing Nginx configuration file to determine whether

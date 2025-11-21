@@ -21,7 +21,7 @@ mod cli;
 pub mod constants;
 pub mod nginx;
 pub mod utils;
-use cli::commands::{activate_site, deactivate_site, delete_site, spawn_site, update_site};
+use cli::commands::{activate_site, deactivate_site, delete_site, spawn_site, update_site, list_sites};
 use colored::*;
 use std::process;
 
@@ -96,7 +96,12 @@ fn main() {
             let wp = matches.get_flag("wp");
             let ssl = matches.get_flag("ssl");
             update_site(site_name, wp, ssl);
-        }
+    } else if matches.subcommand_matches("list").is_some() {
+        require_elevated_privileges();
+
+        // List sites
+        list_sites();
+    }
 }
 
 /// Checks if the program is running with elevated privileges (root or sudo).

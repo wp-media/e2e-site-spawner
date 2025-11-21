@@ -23,10 +23,10 @@
 //! system instability.
 
 use crate::constants::{DB_CHARSET, DB_PASSWORD, DB_USER};
-use crate::constants::{DB_HOST, HTML_DEFAULT_INDEX_FILE, NGINX_CONF_D_PATH, SITES_PATH};
+use crate::constants::{DB_HOST, HTML_DEFAULT_INDEX_FILE, NGINX_CONF_D_PATH, SITES_PATH, NGINX_HTTP_CONFIG_MARKER, NGINX_HTTPS_CONFIG_MARKER};
 use crate::nginx::config::validate_nginx_configuration;
 use crate::nginx::{self, reload_nginx, check_if_https_in_nginx_config_file};
-use crate::nginx::{append_to_nginx_file, create_nginx_file};
+use crate::nginx::{append_to_nginx_file, create_nginx_file, get_list_of_sites_nginx_file_paths};
 use crate::utils::db;
 use crate::utils::sites::{self, check_if_site_exists, create_file_with_content_if_not_exists, get_sudo_user, put_wordpress_in_site_directory, revert_site_spawn};
 use crate::utils::ssl::{self, remove_site_from_acme};
@@ -909,6 +909,201 @@ pub fn update_site(site_name: &str, wp: bool, ssl: bool) {
         update_with_wordpress(&nginx_config).unwrap_or(());
     } if ssl {
         update_with_ssl(&nginx_config).unwrap_or(());
+    }
+}
+
+/// Lists all configured sites with their status and features.
+///
+/// This function scans the Nginx configuration directory and displays information
+/// about each site including:
+/// - Whether it's managed by e2sp
+/// - SSL status (if HTTPS is configured)
+/// - WordPress status (if wp-config.php exists)
+/// - Active/Deactivated status based on file extension
+///
+/// The output is color-coded for better readability.
+pub fn list_sites() {
+    use colored::*;
+    
+    let config_sites_path = Path::new(NGINX_CONF_D_PATH);
+    if !config_sites_path.exists() || !config_sites_path.is_dir() {
+        println!("No Nginx configuration directory found at '{}'.", NGINX_CONF_D_PATH);
+        return;
+    }
+    
+    // Get all nginx config files (both .conf and .conf.deactivated)
+    let sites_nginx_files = get_list_of_sites_nginx_file_paths().unwrap_or_else(|e| {
+        eprintln!("✗ Failed to read Nginx configuration directory: {}", e);
+        process::exit(1);
+    });
+    
+    if sites_nginx_files.is_empty() {
+        println!("No sites found in Nginx configuration directory '{}'.", NGINX_CONF_D_PATH);
+        return;
+    }
+    
+    // Structure to hold site information
+    struct SiteInfo {
+        name: String,
+        is_managed: bool,
+        has_ssl: bool,
+        has_wordpress: bool,
+        is_active: bool,
+    }
+    
+    let mut sites: Vec<SiteInfo> = Vec::new();
+    
+    // Process each configuration file
+    for file_path in sites_nginx_files {
+        // Read file content once for all checks
+        let content = match fs::read_to_string(&file_path) {
+            Ok(c) => c,
+            Err(_) => continue, // Skip files we can't read
+        };
+        
+        // Check if it's a valid nginx config with server block
+        if !content.contains("server {") {
+            continue;
+        }
+        
+        // Get file name and determine status
+        let file_name = Path::new(&file_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        
+        // Determine if site is active based on file extension
+        let is_active = file_name.ends_with(".conf") && !file_name.ends_with(".conf.deactivated");
+        
+        // Extract site name by removing extensions
+        let base = file_name
+            .strip_suffix(".conf.deactivated")
+            .or_else(|| file_name.strip_suffix(".conf"))
+            .unwrap_or(&file_name)
+            .to_string();
+        
+        // Validate site name
+        if !validate_site_name(&base) {
+            continue;
+        }
+        
+        // Check if managed by e2sp (contains our marker from the template)
+        let is_managed = content.contains(NGINX_HTTP_CONFIG_MARKER);
+        if !is_managed {
+            // If not managed, add with minimal info
+            sites.push(SiteInfo {
+                name: base,
+                is_managed,
+                has_ssl: false,
+                has_wordpress: false,
+                is_active: false,
+            });
+            continue;
+        }
+        // Check for SSL (only if managed by e2sp)
+        let has_ssl = content.contains(NGINX_HTTPS_CONFIG_MARKER);
+        
+        // Construct the site path using SITES_PATH constant and base name
+        let wp_config_path = format!("{}/{}/wp-config.php", SITES_PATH, base);
+        // Check for WordPress by looking for wp-config.php in site root
+        let has_wordpress = Path::new(&wp_config_path).exists();
+
+        sites.push(SiteInfo {
+            name: base,
+            is_managed,
+            has_ssl,
+            has_wordpress,
+            is_active,
+        });
+    }
+    
+    // Sort sites alphabetically by name
+    sites.sort_by(|a, b| a.name.cmp(&b.name));
+    
+    if sites.is_empty() {
+        println!("No valid sites found.");
+        return;
+    }
+    
+    // Print header
+    println!("\n{}", "Configured Sites:".bold().underline());
+    println!();
+    
+    // Display each site with its status
+    for site in &sites {
+        if !site.is_managed {
+            // Non-e2sp managed sites
+            println!("  {} - {}",
+                site.name.bright_white(),
+                "not managed by e2sp".dimmed()
+            );
+        } else {
+            // Build features list
+            let mut features = Vec::new();
+            if site.has_ssl {
+                features.push("ssl");
+            }
+            if site.has_wordpress {
+                features.push("wp");
+            }
+            
+            // Format the line based on what features exist
+            let status = if site.is_active {
+                "(active)".green()
+            } else {
+                "(deactivated)".yellow()
+            };
+            
+            if features.is_empty() {
+                // No features, just show name and status
+                println!("  {} - {}",
+                    site.name.bright_white(),
+                    status
+                );
+            } else {
+                // Show features
+                let features_str = features.iter().map(|f| {
+                    match *f {
+                        "ssl" => "ssl".green().to_string(),
+                        "wp" => "wp".blue().to_string(),
+                        _ => f.to_string(),
+                    }
+                }).collect::<Vec<_>>().join(", ");
+                
+                println!("  {} - {} - {}",
+                    site.name.bright_white(),
+                    features_str,
+                    status
+                );
+            }
+        }
+    }
+    
+    println!();
+    
+    // Print summary
+    let total = sites.len();
+    let managed = sites.iter().filter(|s| s.is_managed).count();
+    let active = sites.iter().filter(|s| s.is_managed && s.is_active).count();
+    let deactivated = sites.iter().filter(|s| s.is_managed && !s.is_active).count();
+    let unmanaged = sites.iter().filter(|s| !s.is_managed).count();
+    
+    println!("{}", "Summary:".bold());
+    println!("  Total sites: {}", total.to_string().bright_white());
+    
+    if managed > 0 {
+        println!("  Managed by e2sp: {} ({} active, {} deactivated)",
+            managed.to_string().cyan(),
+            active.to_string().green(),
+            deactivated.to_string().yellow()
+        );
+    }
+    
+    if unmanaged > 0 {
+        println!("  Not managed by e2sp: {}",
+            unmanaged.to_string().dimmed()
+        );
     }
 }
 
