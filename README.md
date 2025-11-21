@@ -158,7 +158,7 @@ Provides a comprehensive inventory of all configured sites on the server. The co
 Output format:
 
 ```text
-Configured Sites:
+Sites list:
 
   example.com - ssl, wp - (active)
   test-site.com - wp - (deactivated)
