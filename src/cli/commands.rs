@@ -1027,7 +1027,7 @@ pub fn list_sites() {
     }
     
     // Print header
-    println!("\n{}", "Configured Sites:".bold().underline());
+    println!("\n{}", "Site list:".bold().underline());
     println!();
     
     // Display each site with its status

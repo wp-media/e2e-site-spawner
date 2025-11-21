@@ -443,8 +443,8 @@ pub fn get_list_of_sites_nginx_file_paths() -> Result<Vec<String>, String> {
                 if !(file_name_str.ends_with(".conf") || file_name_str.ends_with(".conf.deactivated")) {
                     continue;
                 }
-
-                config_list.push(file_name_str.into_owned());
+                let file_path = entry.path();
+                config_list.push(file_path.to_string_lossy().into_owned());
             }
             _ => {
                 // skip directories, symlinks to dirs, etc.
