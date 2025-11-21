@@ -4,11 +4,12 @@ CLI for provisioning and managing WordPress or static sites on the QA LNMP serve
 
 ## Feature Highlights
 
-- **End-to-end lifecycle** – `spawn`, `delete`, `deactivate`, `activate`, and `update` commands cover the entire site lifecycle.
+- **End-to-end lifecycle** – `spawn`, `delete`, `deactivate`, `activate`, `update`, and `list` commands cover the entire site lifecycle.
 - **Safe automation** – every provisioning step is tracked so the tool can roll back partial work automatically when failures occur.
 - **WordPress aware** – downloads the latest WordPress build, creates a dedicated database, and generates a salted `wp-config.php` file.
 - **HTTPS ready** – integrates with [`acme.sh`](https://github.com/acmesh-official/acme.sh) to request and install Let's Encrypt certificates, then appends the HTTPS server block to nginx.
 - **Static sites supported** – `--no-wp` produces a static site skeleton backed by the bundled `default-index.html` template.
+- **Site inventory** – `list` command provides a comprehensive overview of all configured sites with their status and features.
 
 > **IMPORTANT**
 >
@@ -111,6 +112,7 @@ sudo e2sp --help
 | `deactivate <site>` | Renames the nginx config to `.conf.deactivated` to take the site offline without deleting assets. |
 | `activate <site>` | Reverts the `.deactivated` config back to `.conf` and reloads nginx. |
 | `update <site> [--wp] [--ssl]` | Adds WordPress to a static site and/or enables SSL on an existing HTTP-only deployment. |
+| `list` | Displays all configured sites with their status, features, and management information. |
 
 Use `e2sp <command> --help` for command-specific usage text and examples.
 
@@ -143,6 +145,53 @@ Extends an existing site in-place:
 
 - `--wp` – installs WordPress into an existing static site after ensuring no previous installation or database exists.
 - `--ssl` – generates certificates, backs up the nginx config, appends the HTTPS block, validates nginx, and reverts on failure.
+
+#### `list`
+
+Provides a comprehensive inventory of all configured sites on the server. The command scans `/etc/nginx/conf.d/` for configuration files and displays:
+
+- **Site name** – The domain name extracted from the config filename
+- **Features** – Indicates if SSL and/or WordPress are enabled (color-coded)
+- **Status** – Shows if the site is active or deactivated
+- **Management** – Identifies sites managed by e2sp vs. external configurations
+
+Output format:
+
+```text
+Configured Sites:
+
+  example.com - ssl, wp - (active)
+  test-site.com - wp - (deactivated)
+  static-site.com - (active)
+  old-site.com - not managed by e2sp
+
+Summary:
+  Total sites: 4
+  Managed by e2sp: 3 (2 active, 1 deactivated)
+  Not managed by e2sp: 1
+```
+
+Color coding:
+
+- Site names: bright white
+- SSL indicator: green
+- WordPress indicator: blue
+- Active status: green
+- Deactivated status: yellow
+- Unmanaged sites: dimmed gray
+
+The command detects:
+
+- **SSL status** by checking for HTTPS configuration markers in the nginx config
+- **WordPress** by verifying the presence of `wp-config.php` in the site directory
+- **Active/Deactivated** based on the config file extension (`.conf` vs `.conf.deactivated`)
+- **e2sp management** by looking for specific configuration markers added by the tool
+
+No arguments are required:
+
+```bash
+sudo e2sp list
+```
 
 ## What gets provisioned?
 
