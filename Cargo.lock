@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "e2e-site-spawner"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "assert_cmd",
  "clap",
