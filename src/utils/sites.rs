@@ -436,7 +436,7 @@ pub fn generate_wp_config_content_from_sample(
     db_user: &str,
     db_password: &str,
     db_host: &str,
-    db_charset: &str,
+    _db_charset: &str,
     wp_config_sample: String,
 ) -> Result<String, FileCreationError> {
     let mut wp_config_content = wp_config_sample;
@@ -444,8 +444,10 @@ pub fn generate_wp_config_content_from_sample(
         .replace("database_name_here", db_name)
         .replace("username_here", db_user)
         .replace("password_here", db_password)
-        .replace("localhost", db_host)
-        .replace("utf8", db_charset);
+        .replace("localhost", db_host);
+        // Removing charset replacement since WordPress 6.9 defaults to utf8mb4
+        // TODO: Refactor to allow custom charset if needed in future or simply remove parameter from this function
+        // .replace("utf8", db_charset);
     // Add security keys
     loop {
         let placeholder = "put your unique phrase here";
