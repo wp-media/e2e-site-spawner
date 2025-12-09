@@ -13,7 +13,7 @@ CLI for provisioning and managing WordPress or static sites on the QA LNMP serve
 
 > **IMPORTANT**
 >
-> This binary is tailored for the WP Media QA LNMP environment documented in the [QA LNMP runbook](https://www.notion.so/wpmedia/LNMP-WordPress-site-on-Nginx-137b1ef929d14b029a940567f0605a4c). Paths, users, and services are hard-coded to match that stack. Other LNMP servers that share similar configuration might be compatible as well.
+> This binary is tailored for the WP Media QA LNMP environment documented in the [QA LNMP runbook](https://www.notion.so/wpmedia/LNMP-WordPress-site-on-Nginx-137b1ef929d14b029a940567f0605a4c). Paths, users, and services are hard-coded to match that stack. Other LNMP servers that share similar configuration might be compatible as well. However, it should be possible to use in environments with different configuration if values of constants are adapted for it.
 
 ## Prerequisites
 
