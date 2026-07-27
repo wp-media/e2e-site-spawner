@@ -880,7 +880,7 @@ pub fn create_file_with_content_if_not_exists(
 ///
 /// ```ignore
 /// create_wp_uploads_directory("/var/www/html/example.com")?;
-/// // → /var/www/html/example.com/wp-content/uploads (0755)
+/// // → /var/www/html/example.com/wp-content/uploads (0777)
 /// ```
 pub fn create_wp_uploads_directory(site_path: &str) -> Result<(), FileCreationError> {
     let uploads_path = format!(

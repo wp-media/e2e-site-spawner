@@ -229,12 +229,17 @@ pub const WP_UPLOADS_RELATIVE_PATH: &str = "wp-content/uploads";
 /// Unix permissions applied to the WordPress uploads directory.
 ///
 /// # Default Value
-/// `0o755` - rwxr-xr-x
+/// `0o777` - rwxrwxrwx
 ///
-/// Combined with [`WEB_SERVER_USER`] ownership this is everything WordPress
-/// needs to write media, and it matches the mode of the `wp-content`
-/// subdirectories shipped in the WordPress archive.
-pub const WP_UPLOADS_PERMISSIONS: u32 = 0o755;
+/// [`WEB_SERVER_USER`] ownership alone would be enough for WordPress to write
+/// media. The wider mode matches [`SITES_PATH`]'s site roots and lets QA drop
+/// fixtures into the directory over SSH without sudo.
+///
+/// # ⚠️ Security Warning
+/// World-writable uploads are only acceptable because the QA LNMP fleet is a
+/// controlled, disposable environment. Never carry this mode over to a
+/// production host.
+pub const WP_UPLOADS_PERMISSIONS: u32 = 0o777;
 
 /// Marker comment delimiting the e2sp-managed block inside `wp-config.php`.
 ///

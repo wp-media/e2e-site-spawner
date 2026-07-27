@@ -231,7 +231,7 @@ pub const REMOVE_SSL_DIRECTORY: [SpawnSteps; 2] =
 ///
 /// - Site directory: 777 (www-data:www-data ownership, applied recursively to
 ///   every file once the last one is written)
-/// - `wp-content/uploads`: 755 (www-data:www-data ownership)
+/// - `wp-content/uploads`: 777 (www-data:www-data ownership)
 /// - SSL directory: 750 (current_user:root ownership)
 /// - Configuration files: Created with default umask
 ///
@@ -1228,7 +1228,7 @@ pub fn list_sites() {
 /// /var/www/html/{site_name}/
 /// ├── wp-admin/                  # WordPress admin files (created)
 /// ├── wp-content/                # Themes and plugins (created)
-/// │   └── uploads/               # Media directory (created, 755)
+/// │   └── uploads/               # Media directory (created, 777)
 /// ├── wp-includes/               # WordPress core files (created)
 /// ├── wp-config.php              # Database configuration (created)
 /// ├── index.php                  # WordPress entry point (created)

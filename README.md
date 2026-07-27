@@ -200,7 +200,7 @@ sudo e2sp list
 | Resource | Location | Notes |
 | --- | --- | --- |
 | Site root | `/var/www/html/<site>` | chmod `0777` for compatibility with existing workflows. Owned by `www-data:www-data`, applied recursively once every file has been written. |
-| Uploads directory | `/var/www/html/<site>/wp-content/uploads` | WordPress does not ship this directory, so it is created up front (`0755`, `www-data:www-data`). WordPress sites only. |
+| Uploads directory | `/var/www/html/<site>/wp-content/uploads` | WordPress does not ship this directory, so it is created up front (`0777`, `www-data:www-data`). WordPress sites only. |
 | Nginx config | `/etc/nginx/conf.d/<site>.conf` | HTTP block is always present; HTTPS block is appended when SSL is enabled. |
 | SSL material | `/etc/nginx/ssl/<site>/` | Contains `privkey.pem` and `fullchain.pem`. Created only when SSL is requested. |
 | Database | `wp_<site>` | Created through the MySQL root account and granted to the `wordpress` user with password `pleaseadvise` (see `src/constants.rs`). |
