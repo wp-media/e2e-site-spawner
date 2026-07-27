@@ -1,0 +1,224 @@
+name: CI
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+  # Weekly run: surfaces newly published RustSec advisories and upstream
+  # toolchain regressions even when nothing has been pushed.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+# Tag pushes are deliberately absent: release-cli.yml owns `v*` tags and
+# re-runs these checks on the tagged commit before it publishes anything.
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Only supersede in-flight PR runs. develop and scheduled runs are allowed to
+  # finish so their caches and build artifacts are always complete.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Nothing here writes to the repository, so the whole workflow stays read-only.
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # Explicit `bash` runs as `bash --noprofile --norc -eo pipefail`; the
+    # implicit default is only `bash -e`, which lets a failing command inside a
+    # pipeline pass unnoticed.
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Incremental artifacts never outlive a CI job — skip the extra work and disk.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ── Static checks ────────────────────────────────────────────────────────
+  # e2e-site-spawner is a single binary crate (no workspace, no lib target), so
+  # these are plain crate-level invocations rather than `--workspace`.
+  check:
+    name: Check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - name: Docs
+        # Every public item in this crate must be documented (see CLAUDE.md),
+        # so broken intra-doc links are treated as build failures.
+        run: cargo doc --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # ── Tests ────────────────────────────────────────────────────────────────
+  # The suite must run UNPRIVILEGED: the CLI tests assert the "ELEVATED
+  # PRIVILEGES REQUIRED" path, and e2sp mutates real system state (nginx
+  # configs, /var/www/html, MySQL databases) as soon as it does have root.
+  # Tests needing root / nginx / MySQL / network / acme.sh are `#[ignore]`d and
+  # are compiled and listed here, never executed.
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # `ubuntu-24.04-arm` is free for public repositories and unavailable in
+        # private ones — drop the arm64 legs if this repository ever goes
+        # private, or the jobs will fail with no matching runner.
+        include:
+          - name: linux-x64
+            os: ubuntu-24.04
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Assert the runner is not root
+        run: |
+          if [ "$(id -u)" -eq 0 ]; then
+            echo "::error::Refusing to run the suite as root: e2sp mutates real system state and the CLI tests assert the privilege-refusal path."
+            exit 1
+          fi
+      - name: Test
+        run: cargo test --locked
+      - name: Inventory system-dependent tests (compiled, not run)
+        run: cargo test --locked -- --ignored --list
+
+  # Early warning for upstream Rust regressions. Advisory by design: it is not
+  # part of the CI gate, so a beta-only breakage never blocks a merge.
+  test-beta:
+    name: Test (beta, advisory)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: beta
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  # ── Release-profile build ────────────────────────────────────────────────
+  # Proves the shipped profile compiles and gives QA a ready binary for any
+  # develop commit. Built natively per architecture — `flate2` pulls in
+  # `libz-sys`, which compiles C, so native runners avoid a cross toolchain.
+  # Artifacts are glibc-dynamic: Ubuntu 24.04 (glibc 2.39) or newer.
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # See the note on arm64 runners in the `test` job above.
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Assert the host triple matches the artifact label
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          if [ "$host" != "$EXPECTED_TARGET" ]; then
+            echo "::error::Runner host triple is $host but the artifact would be labelled $EXPECTED_TARGET."
+            exit 1
+          fi
+      - name: Build
+        run: cargo build --release --locked
+      - name: Smoke test the binary
+        # Privilege-free paths only: every lifecycle command requires root.
+        run: |
+          ./target/release/e2sp --version
+          ./target/release/e2sp --help
+      - name: Package
+        # Tar before uploading: the artifact zip does not preserve the
+        # executable bit, a bare binary would arrive non-executable.
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ -z "$version" ]; then
+            echo "::error::Could not read the package version from Cargo.toml."
+            exit 1
+          fi
+          # Dev builds carry the commit so a downloaded artifact is traceable
+          # and can never be mistaken for a release archive.
+          archive="e2sp-${version}-${GITHUB_SHA:0:7}-${TARGET}.tar.gz"
+          tar -C target/release -czf "$archive" e2sp
+          sha256sum "$archive"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: e2sp-${{ matrix.target }}
+          path: e2sp-*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  # ── Dependency audit ─────────────────────────────────────────────────────
+  # Advisory by design, and deliberately NOT part of the CI gate: an advisory
+  # published against a transitive dependency would otherwise block every
+  # unrelated PR. A failure still shows as a red job on the run.
+  # `--deny warnings` is omitted for the same reason — the lockfile currently
+  # carries RUSTSEC-2026-0002 (`lru` unsoundness, reached through `mysql`),
+  # which has no fixed release. Actual vulnerabilities still fail the job.
+  audit:
+    name: Security audit (advisory)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+
+  # ── CI gate ──────────────────────────────────────────────────────────────
+  # Single required check for branch protection. Matrix job names are dynamic
+  # ("Test (linux-arm64)", "Build (aarch64-unknown-linux-gnu)"), so this job
+  # provides one stable name — "CI" — to configure as the required status
+  # check; matrix changes then never break the protection rule.
+  # `test-beta` and `audit` are advisory and intentionally excluded.
+  ci:
+    name: CI
+    if: always()
+    needs: [check, test, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check results
+        if: >-
+          needs.check.result != 'success' ||
+          needs.test.result != 'success' ||
+          needs.build.result != 'success'
+        run: exit 1

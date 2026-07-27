@@ -1,0 +1,247 @@
+name: Release CLI
+
+# Publishes the `e2sp` binary for a `v*` tag. Self-contained on purpose: it
+# re-verifies and rebuilds the tagged commit rather than reaching into another
+# workflow's artifacts, so a release can never be assembled from a build that
+# does not correspond to the tag.
+on:
+  push:
+    tags: ["v*"]
+  # Manual re-run of a failed publish. GitHub allows dispatching against a tag;
+  # the first job refuses anything that is not a tag. Note that dispatch is only
+  # offered once this file is on the default branch (develop).
+  workflow_dispatch:
+
+concurrency:
+  # One publish per tag, and never cancel one in flight — a half-uploaded
+  # release is worse than a slow one.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Only the publish job may write; everything before it is read-only.
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # Explicit `bash` runs as `bash --noprofile --norc -eo pipefail`; the
+    # implicit default is only `bash -e`, which lets a failing command inside a
+    # pipeline pass unnoticed.
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ── Gate ─────────────────────────────────────────────────────────────────
+  # Fails in seconds on a mismatched tag, before anything is compiled, then
+  # re-runs the CI checks against the tagged commit. A tag can point at a
+  # commit CI never saw, so trusting a previous CI run is not enough.
+  verify:
+    name: Verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Resolve and check the version
+        id: version
+        env:
+          # Read through the environment rather than interpolating the ref into
+          # the script body.
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::This workflow only runs for tags; got ref type '$REF_TYPE' ($GITHUB_REF)."
+            exit 1
+          fi
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ -z "$version" ]; then
+            echo "::error::Could not read the package version from Cargo.toml."
+            exit 1
+          fi
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version (expected tag v$version)."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing e2sp $version from $GITHUB_REF_NAME" >> "$GITHUB_STEP_SUMMARY"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - name: Docs
+        # Same bar as CI: a release only comes from a commit that passes every
+        # check, including the documentation requirement in CLAUDE.md.
+        run: cargo doc --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Assert the runner is not root
+        # Same reason as in CI: the CLI tests assert the privilege-refusal path,
+        # and e2sp mutates real system state once it has root.
+        run: |
+          if [ "$(id -u)" -eq 0 ]; then
+            echo "::error::Refusing to run the suite as root."
+            exit 1
+          fi
+      - name: Test
+        run: cargo test --locked
+
+  # ── Build ────────────────────────────────────────────────────────────────
+  # Native per architecture (`flate2` pulls in `libz-sys`, which compiles C, so
+  # native runners avoid a cross toolchain) and uncached on purpose: a release
+  # binary is built from scratch, never from another run's leftovers.
+  # Output is glibc-dynamic — Ubuntu 24.04 (glibc 2.39) or newer.
+  build:
+    name: Build (${{ matrix.target }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # `ubuntu-24.04-arm` is free for public repositories and unavailable in
+        # private ones — drop the arm64 leg if this repository ever goes
+        # private, or the job will fail with no matching runner.
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Assert the host triple matches the artifact label
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          if [ "$host" != "$EXPECTED_TARGET" ]; then
+            echo "::error::Runner host triple is $host but the artifact would be labelled $EXPECTED_TARGET."
+            exit 1
+          fi
+      - name: Build
+        run: cargo build --release --locked
+      - name: Smoke test the binary
+        # Privilege-free paths only: every lifecycle command requires root.
+        run: |
+          ./target/release/e2sp --version
+          ./target/release/e2sp --help
+      - name: Package
+        # Tar before uploading: the artifact zip does not preserve the
+        # executable bit, so a bare binary would arrive non-executable.
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          archive="e2sp-${VERSION}-${TARGET}.tar.gz"
+          mkdir -p dist
+          cp target/release/e2sp README.md LICENSE dist/
+          chmod 755 dist/e2sp
+          tar -C dist -czf "$archive" e2sp README.md LICENSE
+          tar -tzf "$archive"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: e2sp-${{ matrix.target }}
+          path: e2sp-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # ── Publish ──────────────────────────────────────────────────────────────
+  publish:
+    name: Publish
+    needs: [verify, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      # Create the release and upload its assets.
+      contents: write
+      # Sign and store build provenance (actions/attest).
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: e2sp-*
+          merge-multiple: true
+          path: dist
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          {
+            echo '### Artifacts'
+            echo '```'
+            cat SHA256SUMS.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Attest build provenance
+        # Signed SLSA provenance for each archive, verifiable with
+        # `gh attestation verify <file> --repo <owner>/<repo>`. Free for public
+        # repositories.
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*.tar.gz
+      - name: Create the draft release
+        id: release
+        uses: softprops/action-gh-release@v3
+        with:
+          # Assets are uploaded to a draft, which is published in the next step.
+          # This keeps a failed upload from leaving a published-but-empty
+          # release, and is also the supported order when a repository has
+          # immutable releases enabled.
+          draft: true
+          # Semver prerelease tags (v1.2.3-rc.1) are marked as prereleases.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          # Auto-generated notes are appended after the body below.
+          generate_release_notes: true
+          body: |
+            ### Install
+
+            Download the archive for your architecture (`x86_64` or `aarch64`), then:
+
+            ```bash
+            tar -xzf e2sp-${{ needs.verify.outputs.version }}-<target>.tar.gz e2sp
+            sudo install -o root -g root -m 755 e2sp /usr/local/bin/e2sp
+            ```
+
+            Requires Linux with glibc 2.39 or newer (Ubuntu 24.04+), plus nginx,
+            PHP-FPM, systemd and MySQL/MariaDB as described in the README. All
+            lifecycle commands must run as root.
+
+            Verify the download:
+
+            ```bash
+            sha256sum -c SHA256SUMS.txt
+            gh attestation verify e2sp-${{ needs.verify.outputs.version }}-<target>.tar.gz --repo ${{ github.repository }}
+            ```
+      - name: Publish the release
+        # Flipped by release ID rather than by tag: the REST endpoint that
+        # resolves a tag does not return drafts, so the ID is the only reliable
+        # handle on the release created above.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.id }}
+        run: |
+          if [ -z "$RELEASE_ID" ]; then
+            echo "::error::The release step did not report a release ID; refusing to leave a draft behind."
+            exit 1
+          fi
+          url=$(gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false --jq '.html_url')
+          echo "Published $url" >> "$GITHUB_STEP_SUMMARY"

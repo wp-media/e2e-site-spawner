@@ -1,5 +1,7 @@
 # E2E Site Spawner
 
+[![CI](https://github.com/wp-media/e2e-site-spawner/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/wp-media/e2e-site-spawner/actions/workflows/ci.yml)
+
 CLI for provisioning and managing WordPress or static sites on the QA LNMP server fleet. The tool orchestrates nginx, filesystem layout, SSL certificates, and MySQL/MariaDB databases so that each site follows the same hardened baseline.
 
 ## Feature Highlights
@@ -226,6 +228,43 @@ Each provisioning phase validates nginx syntax via `nginx -t`; failures trigger 
   ```
 
 Test doubles for nginx/MySQL are not provided—tests interact with the real system. When running without root the tests assert that permission errors are surfaced correctly.
+
+### Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and pull request against `develop`, weekly on a schedule, and on demand. It never writes to the repository.
+
+| Job | What it does |
+| --- | --- |
+| `Check` | `cargo fmt --all --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, and `cargo doc --no-deps --locked` with `RUSTDOCFLAGS=-D warnings`. |
+| `Test (linux-x64)`, `Test (linux-arm64)` | `cargo test --locked` as an unprivileged user; the job aborts if the runner is root, since the CLI tests assert the privilege-refusal path. `#[ignore]`d tests (root / nginx / MySQL / network / acme.sh) are compiled and listed, never executed. |
+| `Test (beta, advisory)` | Same suite on the beta toolchain. Advisory—never blocks a merge. |
+| `Build (x86_64-unknown-linux-gnu)`, `Build (aarch64-unknown-linux-gnu)` | `cargo build --release --locked` natively on each architecture, smoke-tests `--version` / `--help`, and uploads `e2sp-<version>-<commit>-<target>.tar.gz` (30-day retention) so QA can grab any `develop` build. |
+| `Security audit (advisory)` | `cargo audit` against `Cargo.lock`. Advisory, so an advisory freshly published against a transitive dependency cannot block unrelated PRs. |
+| `CI` | Aggregate gate with a stable name—configure **this** one as the required status check in branch protection, since the matrix job names change whenever the matrix does. |
+
+The arm64 legs use the `ubuntu-24.04-arm` runner, which is free for public repositories and unavailable in private ones.
+
+### Releases
+
+[`.github/workflows/release-cli.yml`](.github/workflows/release-cli.yml) owns `v*` tags and is the only workflow that writes anything:
+
+```bash
+# 1. bump `version` in Cargo.toml, refresh Cargo.lock, commit and merge to develop
+# 2. tag the merged commit — the tag must be v<Cargo.toml version>
+git tag -a v0.1.2 -m "e2sp 0.1.2"
+git push origin v0.1.2
+```
+
+The workflow then, in order: refuses any ref that is not a tag; fails if the tag does not match the `Cargo.toml` version; re-runs fmt / clippy / tests on the tagged commit; builds an uncached release binary per architecture; uploads the archives plus `SHA256SUMS.txt` to a **draft** release; signs [build provenance](https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds) for each archive; and only then publishes the release. A tag suffixed with a hyphen (`v0.2.0-rc.1`) is published as a prerelease—the rule that the tag equals `v<Cargo.toml version>` still holds, so set `version = "0.2.0-rc.1"` in `Cargo.toml` for those.
+
+Each release archive contains the `e2sp` binary, `README.md` and `LICENSE`, and needs Ubuntu 24.04 (glibc 2.39) or newer. Consumers can verify a download with:
+
+```bash
+sha256sum -c SHA256SUMS.txt
+gh attestation verify e2sp-<version>-<target>.tar.gz --repo wp-media/e2e-site-spawner
+```
+
+Because the release is assembled as a draft, any failure before the final step leaves an unpublished draft rather than a broken public release: fix the cause and re-run the workflow, or use `workflow_dispatch` against the existing tag (the entry appears once this file is on `develop`).
 
 ## Troubleshooting
 
