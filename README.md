@@ -207,7 +207,11 @@ sudo e2sp list
 
 Everything under the site root is owned by the web server user because the tool
 runs as root: without that handover PHP-FPM cannot write, and WordPress falls
-back to asking for FTP credentials on every upload or plugin install.
+back to asking for FTP credentials on every upload or plugin install. Symlinked
+entries are skipped, so a plugin linked in from a developer checkout keeps its
+own ownership.
+
+Each provisioning phase validates nginx syntax via `nginx -t`; failures trigger an automatic rollback using the tracked step list defined in `SpawnSteps`.
 
 ### wp-config.php defaults
 
@@ -223,8 +227,6 @@ conflicting value inherited from the sample:
 | `WP_DEBUG_LOG` | `true` | Writes them to `wp-content/debug.log`. |
 | `WP_DEBUG_DISPLAY` | `false` | Keeps errors out of the rendered page so they cannot break the markup under test. |
 | `FS_METHOD` | `direct` | Writes files with the PHP process' own credentials instead of prompting for FTP access. |
-
-Each provisioning phase validates nginx syntax via `nginx -t`; failures trigger an automatic rollback using the tracked step list defined in `SpawnSteps`.
 
 ## Development
 

@@ -220,7 +220,8 @@ pub const LATEST_WORDPRESS_URL: &str = "https://wordpress.org/latest.tar.gz";
 /// WordPress does **not** ship this directory in its release archive: it is
 /// created on demand the first time a file is uploaded. When PHP-FPM cannot
 /// create it, WordPress falls back to asking for FTP credentials, so the
-/// spawner creates it up front with web-server ownership.
+/// spawner creates it up front and hands it to [`WEB_SERVER_USER`] along with
+/// the rest of the site tree.
 ///
 /// # Default Value
 /// `wp-content/uploads`
@@ -232,8 +233,9 @@ pub const WP_UPLOADS_RELATIVE_PATH: &str = "wp-content/uploads";
 /// `0o777` - rwxrwxrwx
 ///
 /// [`WEB_SERVER_USER`] ownership alone would be enough for WordPress to write
-/// media. The wider mode matches [`SITES_PATH`]'s site roots and lets QA drop
-/// fixtures into the directory over SSH without sudo.
+/// media. The wider mode matches the `0777` used for site roots under
+/// [`SITES_PATH`] and lets QA drop fixtures into the directory over SSH
+/// without sudo.
 ///
 /// # ⚠️ Security Warning
 /// World-writable uploads are only acceptable because the QA LNMP fleet is a

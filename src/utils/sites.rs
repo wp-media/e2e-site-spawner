@@ -854,7 +854,7 @@ pub fn create_file_with_content_if_not_exists(
     Ok(())
 }
 
-/// Creates the WordPress media uploads directory with web-server ownership.
+/// Creates the WordPress media uploads directory.
 ///
 /// WordPress does not ship `wp-content/uploads`; it creates the directory the
 /// first time a file is uploaded. Because the extracted WordPress tree belongs
@@ -1072,12 +1072,18 @@ fn chown_path(path: &Path, uid: Option<Uid>, gid: Option<Gid>) -> Result<(), Fil
 /// - Web files are owned by appropriate web server user
 /// - Sensitive files have restricted ownership
 /// - Group ownership aligns with collaboration needs
+/// # Symlinks
+/// `root` itself is always chowned, following it if it is a symlink, since the
+/// caller named that path explicitly. Symlinks *below* `root` are skipped:
+/// `chown` resolves them, so chowning one would silently change the ownership of
+/// its target — a file outside the tree the caller asked about. Skipping keeps
+/// the blast radius inside `root` and matches what `chown -R` does by default.
+///
 /// # Implementation Details
-/// Utilizes `walkdir::WalkDir` for efficient recursive traversal of directories,
-/// which already yields `path` itself as its first entry. The user and group are
-/// looked up once up front rather than per entry — a WordPress tree holds
-/// thousands of files, and each lookup queries the system user database.
-/// Symlinks are not followed, so a link's target is never chowned by accident.
+/// Utilizes `walkdir::WalkDir` for efficient recursive traversal of directories.
+/// The user and group are looked up once up front rather than per entry — a
+/// WordPress tree holds thousands of files, and each lookup queries the system
+/// user database.
 pub fn set_path_owner_recursive(
     user_name: Option<&str>,
     group_name: Option<&str>,
@@ -1086,10 +1092,15 @@ pub fn set_path_owner_recursive(
     let uid = resolve_uid(user_name)?;
     let gid = resolve_gid(group_name)?;
 
-    for entry in walkdir::WalkDir::new(path) {
+    chown_path(Path::new(path), uid, gid)?;
+
+    for entry in walkdir::WalkDir::new(path).min_depth(1) {
         let entry = entry.map_err(|e| {
             FileCreationError::PermissionSetFailed(format!("Walk error at {}: {}", path, e))
         })?;
+        if entry.path_is_symlink() {
+            continue;
+        }
         chown_path(entry.path(), uid, gid)?;
     }
     Ok(())
@@ -1114,6 +1125,13 @@ pub fn set_path_owner_recursive(
 /// * `Ok(())` if the whole tree now belongs to the web server user and group
 /// * `Err(FileCreationError::PermissionSetFailed)` if the account is missing,
 ///   the process is not root, or the tree could not be traversed
+///
+/// # Symlinks
+///
+/// Symlinked entries inside the tree are left untouched — see
+/// [`set_path_owner_recursive`]. A plugin symlinked into `wp-content/plugins`
+/// from a developer checkout therefore keeps its original ownership instead of
+/// having the checkout handed to the web server.
 ///
 /// # Examples
 ///
@@ -1940,9 +1958,14 @@ define('AUTH_KEY', 'put your unique phrase here');
 
     // ===== e2sp-managed wp-config Block Tests =====
 
-    /// Excerpt of the stock `wp-config-sample.php`, reproduced verbatim
-    /// (WordPress 7.0.2) so these tests fail if the assumptions about the
-    /// shipped file ever stop holding.
+    /// Fixture mirroring the parts of `wp-config-sample.php` this module keys
+    /// off, copied from the WordPress 7.0.2 archive: the `WP_DEBUG` definition
+    /// and the `stop editing` anchor.
+    ///
+    /// Being a copy, it cannot detect a future WordPress release changing that
+    /// layout — the fallbacks in [`e2sp_block_insertion_index`] exist for
+    /// exactly that reason, and the real archive is checked by hand when the
+    /// generator changes.
     const STOCK_SAMPLE: &str = r#"<?php
 define( 'DB_NAME', 'database_name_here' );
 define( 'DB_USER', 'username_here' );
@@ -2232,16 +2255,41 @@ require_once ABSPATH . 'wp-settings.php';
 
     #[test]
     #[cfg(unix)]
-    fn test_set_web_server_ownership_reports_missing_account() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_set_path_owner_recursive_skips_symlinks() {
+        use std::os::unix::fs::symlink;
 
-        // On a QA LNMP box www-data exists and this needs root; elsewhere the
-        // account is missing. Either way the result must be a typed error, and
-        // never a panic.
-        match set_web_server_ownership(temp_dir.path().to_str().unwrap()) {
-            Ok(()) => {}
-            Err(e) => assert!(matches!(e, FileCreationError::PermissionSetFailed(_))),
-        }
+        let temp_dir = TempDir::new().unwrap();
+        let outside = temp_dir.path().join("developer-checkout");
+        let site = temp_dir.path().join("site");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("plugin.php"), "<?php").unwrap();
+        fs::create_dir_all(site.join("wp-content/plugins")).unwrap();
+        symlink(&outside, site.join("wp-content/plugins/my-plugin")).unwrap();
+
+        // A dangling link is the cheap proof that entries are not dereferenced:
+        // `chown` resolves the path, so following this one would fail with
+        // ENOENT. Skipping it succeeds - and by the same token a live link, like
+        // the plugin above, no longer hands a developer's checkout to the web
+        // server. (Asserting on the resulting uid would require root.)
+        symlink(
+            temp_dir.path().join("gone"),
+            site.join("wp-content/plugins/dangling"),
+        )
+        .unwrap();
+
+        assert!(
+            set_path_owner(
+                None,
+                None,
+                site.join("wp-content/plugins/dangling").to_str().unwrap()
+            )
+            .is_err(),
+            "chown must resolve symlinks - otherwise this test proves nothing"
+        );
+        assert!(
+            set_path_owner_recursive(None, None, site.to_str().unwrap()).is_ok(),
+            "symlinked entries must be skipped, not dereferenced"
+        );
     }
 
     #[test]

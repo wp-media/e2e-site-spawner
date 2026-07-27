@@ -1445,9 +1445,8 @@ fn update_with_wordpress(nginx_config: &nginx::config::NginxConfig) -> Result<()
     // Step 5: Hand the tree to the web server, which wrote none of these files
     if let Err(e) = sites::set_web_server_ownership(&nginx_config.root) {
         eprintln!("✗ Failed to set site directory ownership: {}", e);
-        eprintln!(
-            "  WordPress is installed but its files still belong to root, so uploads,\n  plugin installs, and debug logging will fail. Fix it with:"
-        );
+        eprintln!("  WordPress is installed but its files still belong to root, so uploads,");
+        eprintln!("  plugin installs, and debug logging will fail. Fix it with:");
         eprintln!(
             "    sudo chown -R {}:{} {}",
             WEB_SERVER_USER, WEB_SERVER_GROUP, nginx_config.root
