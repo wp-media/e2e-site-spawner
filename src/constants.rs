@@ -215,6 +215,70 @@ pub const HTML_DEFAULT_INDEX_FILE: &str = include_str!("./assets/default-index.h
 /// - Example: `https://wordpress.org/wordpress-6.4.1.tar.gz`
 pub const LATEST_WORDPRESS_URL: &str = "https://wordpress.org/latest.tar.gz";
 
+/// Media uploads directory, relative to the WordPress site root.
+///
+/// WordPress does **not** ship this directory in its release archive: it is
+/// created on demand the first time a file is uploaded. When PHP-FPM cannot
+/// create it, WordPress falls back to asking for FTP credentials, so the
+/// spawner creates it up front and hands it to [`WEB_SERVER_USER`] along with
+/// the rest of the site tree.
+///
+/// # Default Value
+/// `wp-content/uploads`
+pub const WP_UPLOADS_RELATIVE_PATH: &str = "wp-content/uploads";
+
+/// Unix permissions applied to the WordPress uploads directory.
+///
+/// # Default Value
+/// `0o777` - rwxrwxrwx
+///
+/// [`WEB_SERVER_USER`] ownership alone would be enough for WordPress to write
+/// media. The wider mode matches the `0777` used for site roots under
+/// [`SITES_PATH`] and lets QA drop fixtures into the directory over SSH
+/// without sudo.
+///
+/// # ⚠️ Security Warning
+/// World-writable uploads are only acceptable because the QA LNMP fleet is a
+/// controlled, disposable environment. Never carry this mode over to a
+/// production host.
+pub const WP_UPLOADS_PERMISSIONS: u32 = 0o777;
+
+/// Marker comment delimiting the e2sp-managed block inside `wp-config.php`.
+///
+/// The block holds the constants this tool enforces on every spawned site
+/// (debug logging and direct filesystem writes). The marker makes the block
+/// easy to spot when debugging a QA site and distinguishes it from values
+/// inherited from `wp-config-sample.php`.
+///
+/// # Format
+/// ```php
+/// /* ######E2SP-WP-CONFIGURATION###### */
+/// define( 'WP_DEBUG', true );
+/// // ...
+/// /* ######E2SP-WP-CONFIGURATION###### */
+/// ```
+pub const WP_CONFIG_E2SP_MARKER: &str = "######E2SP-WP-CONFIGURATION######";
+
+// ============================================================================
+// Filesystem Ownership Constants
+// ============================================================================
+
+/// System user that runs Nginx and the PHP-FPM worker processes.
+///
+/// Site files must be owned by this user so WordPress can write uploads,
+/// install plugins and themes, and create `wp-content/debug.log` without
+/// falling back to FTP credentials.
+///
+/// # Default Value
+/// `www-data` - Debian/Ubuntu web server account
+pub const WEB_SERVER_USER: &str = "www-data";
+
+/// System group that runs Nginx and the PHP-FPM worker processes.
+///
+/// # Default Value
+/// `www-data` - Debian/Ubuntu web server group
+pub const WEB_SERVER_GROUP: &str = "www-data";
+
 // ============================================================================
 // Database Configuration Constants
 // ============================================================================

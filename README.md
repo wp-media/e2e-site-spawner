@@ -199,12 +199,34 @@ sudo e2sp list
 
 | Resource | Location | Notes |
 | --- | --- | --- |
-| Site root | `/var/www/html/<site>` | Owned by `www-data:root`, chmod `0777` for compatibility with existing workflows. |
+| Site root | `/var/www/html/<site>` | chmod `0777` for compatibility with existing workflows. Owned by `www-data:www-data`, applied recursively once every file has been written. |
+| Uploads directory | `/var/www/html/<site>/wp-content/uploads` | WordPress does not ship this directory, so it is created up front (`0777`, `www-data:www-data`). WordPress sites only. |
 | Nginx config | `/etc/nginx/conf.d/<site>.conf` | HTTP block is always present; HTTPS block is appended when SSL is enabled. |
 | SSL material | `/etc/nginx/ssl/<site>/` | Contains `privkey.pem` and `fullchain.pem`. Created only when SSL is requested. |
 | Database | `wp_<site>` | Created through the MySQL root account and granted to the `wordpress` user with password `pleaseadvise` (see `src/constants.rs`). |
 
+Everything under the site root is owned by the web server user because the tool
+runs as root: without that handover PHP-FPM cannot write, and WordPress falls
+back to asking for FTP credentials on every upload or plugin install. Symlinked
+entries are skipped, so a plugin linked in from a developer checkout keeps its
+own ownership.
+
 Each provisioning phase validates nginx syntax via `nginx -t`; failures trigger an automatic rollback using the tracked step list defined in `SpawnSteps`.
+
+### wp-config.php defaults
+
+`wp-config.php` is generated from the WordPress `wp-config-sample.php` shipped in
+the downloaded archive: database credentials are filled in and each security key
+gets a unique 64-character salt. On top of that, e2sp adds a block delimited by
+`######E2SP-WP-CONFIGURATION######` holding the QA defaults, replacing any
+conflicting value inherited from the sample:
+
+| Constant | Value | Why |
+| --- | --- | --- |
+| `WP_DEBUG` | `true` | QA needs notices and errors surfaced. |
+| `WP_DEBUG_LOG` | `true` | Writes them to `wp-content/debug.log`. |
+| `WP_DEBUG_DISPLAY` | `false` | Keeps errors out of the rendered page so they cannot break the markup under test. |
+| `FS_METHOD` | `direct` | Writes files with the PHP process' own credentials instead of prompting for FTP access. |
 
 ## Development
 
