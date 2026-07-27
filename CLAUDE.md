@@ -207,31 +207,23 @@ echo -e "\n=== CARGO TEST ==="; cargo test; \
 echo -e "\n=== CARGO DOC ==="; cargo doc --no-deps
 ```
 
-### Current baseline (verified — do not blame your change for these)
+### Current baseline (verified green)
 
-As of this commit (rustc 1.97.1, edition 2024) the suite is **not fully green**:
+As of this commit (rustc 1.97.1, edition 2024) the whole suite is clean, with
+**zero warnings**: `cargo fmt --check`, `cargo clippy --all-targets
+--all-features -- -D warnings`, `cargo test` (104 pass; 17 are `#[ignore]`d
+because they need root / Nginx / MySQL / network), `cargo build`, and
+`cargo doc --no-deps` all exit 0. **Keep it green — do not introduce new
+fmt/clippy violations, test failures, or rustdoc warnings.**
 
-- `cargo build` and `cargo doc --no-deps` succeed (`doc` emits ~29 warnings,
-  mostly bare-URL lints).
-- `cargo fmt --check` **fails** with pre-existing formatting diffs (trailing
-  whitespace, import grouping).
-- `cargo clippy --all-targets --all-features -- -D warnings` **fails** with
-  pre-existing lints, largely inside `#[cfg(test)]` modules (`useless_vec`,
-  `needless_borrows_for_generic_args`, `unnecessary_unwrap`, …).
-- `cargo test` reports **3 failing** unit tests that lag intentional changes or
-  assume a TTY:
-  - `nginx::config::tests::test_nginx_config_new_path_construction` — expects an
-    `ssl_root` of `…/test.com/test.com`; `NginxConfig::new` now produces
-    `…/test.com` (test and its doc comment are stale).
-  - `utils::sites::tests::test_generate_wp_config_content_from_sample` — expects
-    `'utf8mb4'`; charset replacement was intentionally removed (WordPress 6.9
-    defaults to utf8mb4).
-  - `utils::ssl::tests::test_colored_output` — assumes ANSI codes are emitted;
-    `colored` suppresses them when there is no TTY / `NO_COLOR`.
+Notes for keeping docs warning-free:
 
-Rules: **do not introduce new** fmt/clippy violations or test failures; **fix
-the ones in code you touch**; and don't attribute the above baseline failures to
-your change.
+- Link items by full path — `` [`crate::utils::db::create_wordpress_database`] ``.
+  Plain `` [`some_fn`] `` only resolves inside the defining module.
+- rustdoc **cannot** link a private item from another module (e.g.
+  `cli::commands::update_with_ssl`). Link the public entry point and mention the
+  helper in a plain code span instead.
+- Wrap bare URLs in angle brackets: `<https://example.com>`.
 
 ## Local Development & Testing
 

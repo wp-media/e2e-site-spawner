@@ -23,21 +23,29 @@
 //! system instability.
 
 use crate::constants::{DB_CHARSET, DB_PASSWORD, DB_USER};
-use crate::constants::{DB_HOST, HTML_DEFAULT_INDEX_FILE, NGINX_CONF_D_PATH, SITES_PATH, NGINX_HTTPS_CONFIG_MARKER};
+use crate::constants::{
+    DB_HOST, HTML_DEFAULT_INDEX_FILE, NGINX_CONF_D_PATH, NGINX_HTTPS_CONFIG_MARKER, SITES_PATH,
+};
 use crate::nginx::config::validate_nginx_configuration;
-use crate::nginx::{self, check_if_https_in_nginx_config_file, is_active_site, is_managed_by_this_tool, is_websites_config_file, reload_nginx};
+use crate::nginx::{
+    self, check_if_https_in_nginx_config_file, is_active_site, is_managed_by_this_tool,
+    is_websites_config_file, reload_nginx,
+};
 use crate::nginx::{append_to_nginx_file, create_nginx_file, get_list_of_sites_nginx_file_paths};
 use crate::utils::db;
-use crate::utils::sites::{self, check_if_site_exists, create_file_with_content_if_not_exists, get_sudo_user, put_wordpress_in_site_directory, revert_site_spawn};
+use crate::utils::sites::{
+    self, check_if_site_exists, create_file_with_content_if_not_exists, get_sudo_user,
+    put_wordpress_in_site_directory, revert_site_spawn,
+};
 use crate::utils::ssl::{self, remove_site_from_acme};
 use crate::utils::validators::validate_site_name;
+use colored::*;
 use std::fs::remove_dir;
 use std::path::Path;
 use std::{fs, process};
-use colored::*;
 
 /// Represents the various steps involved in spawning a new site.
-/// 
+///
 /// Each variant corresponds to a specific action that can be taken
 /// during site creation. These steps are tracked to enable proper
 /// rollback in case of failure.
@@ -58,56 +66,56 @@ use colored::*;
 #[derive(Clone)]
 pub enum SpawnSteps {
     /// When Nginx configuration file for HTTP was created.
-    /// 
+    ///
     /// Tracks the creation of the initial HTTP configuration file
     /// at `/etc/nginx/conf.d/{site_name}.conf`
     CreateNginxConfig,
-    
+
     /// When the site's root directory was created.
-    /// 
+    ///
     /// Tracks the creation of the document root directory
     /// at `/var/www/html/{site_name}/`
     CreateSiteDirectory,
-    
+
     /// When the directory to store SSL certificates was created.
-    /// 
+    ///
     /// Tracks the creation of the SSL certificate directory
     /// at `/etc/nginx/ssl/{site_name}/`
     CreateSSLDirectory,
-    
+
     /// When SSL certificates were generated and installed.
-    /// 
+    ///
     /// Tracks successful SSL certificate generation via acme.sh
     /// and installation to the SSL directory
     CreateSSL,
-    
+
     /// When Nginx configuration was updated to include HTTPS settings.
-    /// 
+    ///
     /// Tracks the addition of HTTPS server block to the existing
     /// Nginx configuration file
     CreateNginxConfigWithSSL,
-    
+
     /// When the database for the site was created (stores database name).
-    /// 
+    ///
     /// Tracks MySQL database creation. The String parameter holds
     /// the actual database name used (which may include a numeric
     /// suffix if the original name was taken)
     CreateDatabase(String),
-    
+
     /// When the WordPress configuration file (wp-config.php) was created.
-    /// 
+    ///
     /// Tracks the creation of wp-config.php with database credentials
     /// and security salts
     CreateWPConfigFile,
 }
 
 /// Group of steps related to Nginx configuration removal.
-/// 
+///
 /// This constant defines which spawn steps should be considered
 /// as a group when reverting Nginx configuration changes.
-/// 
+///
 /// # Grouping Logic
-/// 
+///
 /// Both HTTP and HTTPS configurations affect the same file, so they're
 /// grouped together to prevent redundant file removal attempts during
 /// rollback operations.
@@ -117,12 +125,12 @@ pub const REMOVE_NGINX_CONFIG: [SpawnSteps; 2] = [
 ];
 
 /// Group of steps related to site directory removal.
-/// 
+///
 /// This constant defines which spawn steps should be considered
 /// as a group when reverting site directory changes.
-/// 
+///
 /// # Grouping Logic
-/// 
+///
 /// The site directory contains all WordPress files including wp-config.php,
 /// so removing the directory also removes the configuration file. These
 /// are grouped to prevent attempting to remove already-deleted files.
@@ -132,12 +140,12 @@ pub const REMOVE_SITE_DIRECTORY: [SpawnSteps; 2] = [
 ];
 
 /// Group of steps related to SSL directory removal.
-/// 
+///
 /// This constant defines which spawn steps should be considered
 /// as a group when reverting SSL-related changes.
-/// 
+///
 /// # Grouping Logic
-/// 
+///
 /// The SSL directory contains all certificates, so removing the directory
 /// also removes the certificates. These are grouped to ensure complete
 /// SSL cleanup with a single operation.
@@ -207,9 +215,9 @@ pub const REMOVE_SSL_DIRECTORY: [SpawnSteps; 2] =
 /// /var/www/html/{site_name}/        # Site root
 /// ├── (WordPress files)              # If WordPress enabled
 /// └── index.html                     # If static site
-/// 
+///
 /// /etc/nginx/conf.d/{site_name}.conf # Nginx config
-/// 
+///
 /// /etc/nginx/ssl/{site_name}/        # If SSL enabled
 /// ├── privkey.pem                    # Private key
 /// └── fullchain.pem                  # Certificate chain
@@ -233,7 +241,7 @@ pub const REMOVE_SSL_DIRECTORY: [SpawnSteps; 2] =
 /// ```no_run
 /// // Create a WordPress site with SSL
 /// spawn_site("example.local", true, false);
-/// 
+///
 /// // Create a static site without SSL or WordPress
 /// spawn_site("static.local", false, true);
 /// ```
@@ -244,7 +252,7 @@ pub const REMOVE_SSL_DIRECTORY: [SpawnSteps; 2] =
 /// * [`deactivate_site`] - To temporarily disable a site
 pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
     println!("Preparing to create site: {}", site_name);
-    println!("");
+    println!();
     // Phase 1: Pre-validation
     validate_nginx_configuration().unwrap_or_else(|e| {
         eprintln!("✗ Nginx configuration validation failed before spawning a new site.");
@@ -253,7 +261,6 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         process::exit(1);
     });
 
-
     if !validate_site_name(site_name) {
         eprintln!("✗ Invalid site name: {}", site_name);
         process::exit(1);
@@ -261,7 +268,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
 
     // Initialize tracking for rollback
     let mut steps_completed: Vec<SpawnSteps> = Vec::new();
-    
+
     // Create Nginx configuration object
     let nginx_config = nginx::config::NginxConfig::new(
         site_name.to_string(),
@@ -270,7 +277,10 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         ssl,
     );
     if check_if_site_exists(&nginx_config) {
-        eprintln!("✗ Site '{}' seems to already exist. Cannot continue.", site_name);
+        eprintln!(
+            "✗ Site '{}' seems to already exist. Cannot continue.",
+            site_name
+        );
         process::exit(1);
     }
     nginx_config.validate().unwrap_or_else(|e| {
@@ -305,13 +315,17 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
             process::exit(1);
         }
     }
-    
+
     // Phase 3: Create site directory
     match sites::create_directory_if_not_exists(nginx_config.root.as_str(), Some(0o777)) {
         Ok(()) => {
             // Change ownership of Sites directory www-data:root
-            if sites::set_path_owner_recursive(Some("www-data"), Some("root"), nginx_config.root.as_str())
-                .is_err()
+            if sites::set_path_owner_recursive(
+                Some("www-data"),
+                Some("root"),
+                nginx_config.root.as_str(),
+            )
+            .is_err()
             {
                 eprintln!("✗ Failed to set Sites directory ownership.");
                 sites::remove_directory(nginx_config.root.as_str()).unwrap_or(());
@@ -325,9 +339,9 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
             revert_site_spawn(site_name, &steps_completed, &nginx_config);
         }
     }
-    
+
     // Validate Nginx config after HTTP setup
-    let _ = validate_nginx_configuration().unwrap_or_else(|e| {
+    validate_nginx_configuration().unwrap_or_else(|e| {
         eprintln!(
             "✗ Nginx configuration validation failed after creating HTTP config. \n{}",
             e
@@ -343,7 +357,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
     // Phase 4: SSL setup (if enabled)
     if let Some(ssl_root) = &nginx_config.ssl_root {
         println!("SSL will be enabled for this site.");
-        
+
         // Create SSL directory
         match sites::create_directory_if_not_exists(ssl_root, Some(0o750)) {
             Ok(()) => {
@@ -359,7 +373,8 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
             Ok(()) => {
                 println!("✓ SSL certificates generated and installed successfully");
                 steps_completed.push(SpawnSteps::CreateSSL);
-                let https_config = nginx_config.generate_config(nginx::config::NginxProtocol::Https);
+                let https_config =
+                    nginx_config.generate_config(nginx::config::NginxProtocol::Https);
                 match append_to_nginx_file(&nginx_config.nginx_config_file_path, &https_config) {
                     Ok(()) => {
                         println!("✓ Nginx configuration file updated for HTTPS successfully");
@@ -379,7 +394,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
                 revert_site_spawn(site_name, &steps_completed, &nginx_config);
             }
         }
-        let _ = validate_nginx_configuration().unwrap_or_else(|e| {
+        validate_nginx_configuration().unwrap_or_else(|e| {
             eprintln!(
                 "✗ Nginx configuration validation failed after creating HTTPS config. \n{}",
                 e
@@ -392,7 +407,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
     }
     if !no_wp {
         println!("Installing WordPress on the site.");
-        
+
         // Download and extract WordPress
         match sites::put_wordpress_in_site_directory(nginx_config.root.as_str()) {
             Ok(()) => {
@@ -403,7 +418,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
                 revert_site_spawn(site_name, &steps_completed, &nginx_config);
             }
         }
-        
+
         // Create database for WordPress site
         let db_name = db::create_db_name(site_name);
         println!("Creating database '{}'...", db_name);
@@ -417,7 +432,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
                 revert_site_spawn(site_name, &steps_completed, &nginx_config);
             }
         }
-        
+
         // Create WordPress configuration file
         match sites::create_wp_config_file(
             &nginx_config.root,
@@ -441,7 +456,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         let path = format!("{}/index.html", nginx_config.root);
         create_file_with_content_if_not_exists(&path, HTML_DEFAULT_INDEX_FILE, None).unwrap_or(());
     }
-    
+
     // Phase 6: Reload Nginx to apply changes
     reload_nginx().unwrap_or_else(|e| {
         eprintln!("✗ Failed to reload Nginx: {}", e);
@@ -496,7 +511,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
 /// - Database content
 /// - SSL certificates
 /// - Configuration files
-/// 
+///
 /// will be permanently deleted.
 ///
 /// # Example
@@ -513,7 +528,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
 pub fn delete_site(site_name: &str) {
     println!("Preparing to delete site: {}", site_name);
     print!("Validating Nginx configuration...");
-    
+
     // Ensure Nginx is healthy before making changes
     validate_nginx_configuration().unwrap_or_else(|e| {
         println!("{}", " failed".bright_red());
@@ -530,22 +545,22 @@ pub fn delete_site(site_name: &str) {
         NGINX_CONF_D_PATH.to_string(),
         true, // Assume SSL might be present
     );
-    
+
     nginx_config.validate().unwrap_or_else(|e| {
         eprintln!("✗ Validation failed: {}", e);
         process::exit(1);
     });
-    
+
     // Attempt to remove all resources (continue on failure)
     print!("Attempting to delete site resources...");
-    
+
     // Remove site directory
     match sites::remove_directory(nginx_config.root.as_str()) {
         Ok(()) => println!("{}", " ok".bright_green()),
         Err(e) => {
             println!("{}", " failed".bright_red());
             eprintln!("✗ Failed to remove site directory: {}", e)
-        },
+        }
     }
 
     // Remove Nginx configuration
@@ -555,7 +570,7 @@ pub fn delete_site(site_name: &str) {
         Err(e) => {
             println!("{}", " failed".bright_red());
             eprintln!("✗ Failed to remove Nginx configuration file: {}", e)
-        },
+        }
     }
     // Remove site from acme (prevent future renewals)
     print!("Attempting to remove site from acme (Deactivate SSL renewal)...");
@@ -569,7 +584,7 @@ pub fn delete_site(site_name: &str) {
                 println!("{}", " failed".bright_red());
                 eprintln!("✗ Failed to remove site from acme: {}", e)
             }
-        },
+        }
     }
     // Remove SSL certificates
     {
@@ -581,16 +596,16 @@ pub fn delete_site(site_name: &str) {
             println!("{}", " ok".bright_green());
             println!("✓ No SSL directory found, skipping removal.");
         } else {
-            match sites::remove_directory(&ssl_root) {
+            match sites::remove_directory(ssl_root) {
                 Ok(()) => println!("{}", " ok".bright_green()),
                 Err(e) => {
                     println!("{}", " failed".bright_red());
                     eprintln!("✗ Failed to remove SSL directory: {}", e)
-                },
+                }
             };
         }
     }
-    
+
     // Drop database
     let db_name = db::create_db_name(site_name);
     print!("Attempting to drop database '{}'...", db_name);
@@ -599,9 +614,9 @@ pub fn delete_site(site_name: &str) {
         Err(e) => {
             println!("{}", " failed".bright_red());
             eprintln!("✗ Failed to drop database '{}': {}", db_name, e)
-        },
+        }
     }
-    
+
     // Validate configuration after changes
     validate_nginx_configuration().unwrap_or_else(|e| {
         eprintln!("✗ Nginx configuration validation failed after deletion.");
@@ -609,7 +624,7 @@ pub fn delete_site(site_name: &str) {
         eprintln!("Nginx error: \n{}", e);
         process::exit(1);
     });
-    
+
     // Reload Nginx to apply changes
     reload_nginx().unwrap_or_else(|e| {
         eprintln!("✗ Failed to reload Nginx: {}", e);
@@ -678,7 +693,7 @@ pub fn delete_site(site_name: &str) {
 /// * [`delete_site`] - To permanently remove the site
 pub fn deactivate_site(site_name: &str) {
     println!("Attempting to deactivate site: {}", site_name);
-    
+
     // Validate Nginx before changes
     validate_nginx_configuration().unwrap_or_else(|e| {
         eprintln!("✗ Nginx configuration validation failed before deactivation.");
@@ -686,7 +701,7 @@ pub fn deactivate_site(site_name: &str) {
         eprintln!("Nginx error: \n{}", e);
         process::exit(1);
     });
-    
+
     // Create config object to get paths
     let nginx_config = nginx::config::NginxConfig::new(
         site_name.to_string(),
@@ -694,7 +709,7 @@ pub fn deactivate_site(site_name: &str) {
         NGINX_CONF_D_PATH.to_string(),
         false,
     );
-    
+
     nginx_config.validate().unwrap_or_else(|e| {
         eprintln!("✗ Validation failed: {}", e);
         process::exit(1);
@@ -711,7 +726,7 @@ pub fn deactivate_site(site_name: &str) {
     }
 
     // Rename configuration file
-    match fs::rename(&active_path, &deactivated_path) {
+    match fs::rename(active_path, &deactivated_path) {
         Ok(()) => {
             println!("✓ Site '{}' deactivated successfully.", site_name);
         }
@@ -790,7 +805,7 @@ pub fn deactivate_site(site_name: &str) {
 /// * [`spawn_site`] - To create a new site
 pub fn activate_site(site_name: &str) {
     println!("Attempting to activate site: {}", site_name);
-    
+
     // Validate Nginx before changes
     validate_nginx_configuration().unwrap_or_else(|e| {
         eprintln!("✗ Nginx configuration validation failed before activation.");
@@ -798,7 +813,7 @@ pub fn activate_site(site_name: &str) {
         eprintln!("Nginx error: \n{}", e);
         process::exit(1);
     });
-    
+
     // Create config object to get paths
     let nginx_config = nginx::config::NginxConfig::new(
         site_name.to_string(),
@@ -806,7 +821,7 @@ pub fn activate_site(site_name: &str) {
         NGINX_CONF_D_PATH.to_string(),
         false,
     );
-    
+
     nginx_config.validate().unwrap_or_else(|e| {
         eprintln!("✗ Validation failed: {}", e);
         process::exit(1);
@@ -823,7 +838,7 @@ pub fn activate_site(site_name: &str) {
     }
 
     // Rename configuration file back to active
-    match fs::rename(&deactivated_path, &active_path) {
+    match fs::rename(&deactivated_path, active_path) {
         Ok(()) => {
             println!("✓ Site '{}' activated successfully.", site_name);
         }
@@ -852,44 +867,37 @@ pub fn activate_site(site_name: &str) {
 /// * `wp` - If `true`, installs WordPress on an existing static site.
 /// * `ssl` - If `true`, generates SSL certificates and enables HTTPS.
 ///
-/// # Status
+/// # Behavior
 ///
-/// ⚠️ **Not Implemented**: This function is currently a placeholder
-/// for future functionality and will not perform any operations.
+/// Exits early (status `0`) if neither `wp` nor `ssl` is requested. Otherwise it
+/// validates the site name and the current Nginx configuration, confirms the
+/// site exists and is managed by e2sp, then applies the requested changes:
 ///
-/// # Planned Features
+/// - `wp` → [`update_with_wordpress`] installs WordPress into the existing site
+///   (failing safely if WordPress or its database already exist).
+/// - `ssl` → [`update_with_ssl`] issues Let's Encrypt certificates and appends
+///   the HTTPS server block, reverting the Nginx config on failure.
 ///
-/// When implemented, this function will support:
+/// Both may be combined; each sub-step reports its own errors and is applied
+/// independently.
 ///
-/// ## WordPress Addition
-/// - Install WordPress in existing static sites
-/// - Create database and wp-config.php
-/// - Preserve existing static files
-/// - Update Nginx configuration for PHP processing
+/// # Panics
 ///
-/// ## SSL Enablement
-/// - Generate Let's Encrypt certificates
-/// - Update Nginx configuration for HTTPS
-/// - Add HTTP to HTTPS redirect
-/// - Preserve existing site functionality
+/// Exits the process with status code `1` if the site name is invalid, the
+/// Nginx configuration is invalid, the site does not exist, or it is not
+/// managed by e2sp.
 ///
-/// ## Other Updates
-/// - Modify Nginx configuration parameters
-/// - Update site directory permissions
-/// - Change PHP version or configuration
-/// - Enable/disable caching
-///
-/// # Example (Future)
+/// # Example
 ///
 /// ```no_run
 /// // Add WordPress to a static site
-/// update_site("static.local", true, false);
+/// update_site("static.example.com", true, false);
 ///
 /// // Enable SSL on an HTTP-only site
-/// update_site("http-only.local", false, true);
+/// update_site("http-only.example.com", false, true);
 ///
 /// // Add both WordPress and SSL
-/// update_site("basic.local", true, true);
+/// update_site("basic.example.com", true, true);
 /// ```
 pub fn update_site(site_name: &str, wp: bool, ssl: bool) {
     if !wp && !ssl {
@@ -910,7 +918,7 @@ pub fn update_site(site_name: &str, wp: bool, ssl: bool) {
         eprintln!("✗ Validation failed: {}", e);
         process::exit(1);
     });
-        // Phase 1: Pre-validation
+    // Phase 1: Pre-validation
     validate_nginx_configuration().unwrap_or_else(|e| {
         eprintln!("✗ Nginx configuration validation failed before updating.");
         eprintln!("Make sure Nginx configuration is okay, since nginx reloads is required.");
@@ -922,13 +930,17 @@ pub fn update_site(site_name: &str, wp: bool, ssl: bool) {
         process::exit(1);
     }
     if !is_managed_by_this_tool(&nginx_config.nginx_config_file_path) {
-        eprintln!("✗ Site '{}' is not managed by e2sp. Cannot update.", site_name);
+        eprintln!(
+            "✗ Site '{}' is not managed by e2sp. Cannot update.",
+            site_name
+        );
         process::exit(1);
     }
     println!("Preparing to update site: {}", site_name);
     if wp {
         update_with_wordpress(&nginx_config).unwrap_or(());
-    } if ssl {
+    }
+    if ssl {
         update_with_ssl(&nginx_config).unwrap_or(());
     }
 }
@@ -945,24 +957,30 @@ pub fn update_site(site_name: &str, wp: bool, ssl: bool) {
 /// The output is color-coded for better readability.
 pub fn list_sites() {
     use colored::*;
-    
+
     let config_sites_path = Path::new(NGINX_CONF_D_PATH);
     if !config_sites_path.exists() || !config_sites_path.is_dir() {
-        println!("No Nginx configuration directory found at '{}'.", NGINX_CONF_D_PATH);
+        println!(
+            "No Nginx configuration directory found at '{}'.",
+            NGINX_CONF_D_PATH
+        );
         return;
     }
-    
+
     // Get all nginx config files (both .conf and .conf.deactivated)
     let sites_nginx_files = get_list_of_sites_nginx_file_paths().unwrap_or_else(|e| {
         eprintln!("✗ Failed to read Nginx configuration directory: {}", e);
         process::exit(1);
     });
-    
+
     if sites_nginx_files.is_empty() {
-        println!("No sites found in Nginx configuration directory '{}'.", NGINX_CONF_D_PATH);
+        println!(
+            "No sites found in Nginx configuration directory '{}'.",
+            NGINX_CONF_D_PATH
+        );
         return;
     }
-    
+
     // Structure to hold site information
     struct SiteInfo {
         name: String,
@@ -971,9 +989,9 @@ pub fn list_sites() {
         has_wordpress: bool,
         is_active: bool,
     }
-    
+
     let mut sites: Vec<SiteInfo> = Vec::new();
-    
+
     // Process each configuration file
     for file_path in sites_nginx_files {
         // Read file content once for all checks
@@ -981,34 +999,34 @@ pub fn list_sites() {
             Ok(c) => c,
             Err(_) => continue, // Skip files we can't read
         };
-        
+
         // Check if it's a valid nginx config with server block
         if !is_websites_config_file(&file_path) {
             continue;
         }
-        
+
         // Get file name and determine status
         let file_name = Path::new(&file_path)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default()
             .to_string();
-        
+
         // Determine if site is active based on file extension
         let is_active = is_active_site(&file_path);
-        
+
         // Extract site name by removing extensions
         let base = file_name
             .strip_suffix(".conf.deactivated")
             .or_else(|| file_name.strip_suffix(".conf"))
             .unwrap_or(&file_name)
             .to_string();
-        
+
         // Validate site name
         if !validate_site_name(&base) {
             continue;
         }
-        
+
         // Check if managed by e2sp (contains our marker from the template)
         let is_managed = is_managed_by_this_tool(&file_path);
         if !is_managed {
@@ -1024,7 +1042,7 @@ pub fn list_sites() {
         }
         // Check for SSL (only if managed by e2sp)
         let has_ssl = content.contains(NGINX_HTTPS_CONFIG_MARKER);
-        
+
         // Construct the site path using SITES_PATH constant and base name
         let wp_config_path = format!("{}/{}/wp-config.php", SITES_PATH, base);
         // Check for WordPress by looking for wp-config.php in site root
@@ -1038,19 +1056,19 @@ pub fn list_sites() {
             is_active,
         });
     }
-    
+
     // Sort sites alphabetically by name
     sites.sort_by(|a, b| a.name.cmp(&b.name));
-    
+
     if sites.is_empty() {
         println!("No valid sites found.");
         return;
     }
-    
+
     // Print header
     println!("\n{}", "Site list:".bold().underline());
     println!();
-    
+
     // Display each site with its status
     for site in &sites {
         if !site.is_managed {
@@ -1061,8 +1079,10 @@ pub fn list_sites() {
                 "(deactivated)".yellow()
             };
             // Non-e2sp managed sites
-            println!("  {} - {} - {}",
-                site.name.bright_white(), status,
+            println!(
+                "  {} - {} - {}",
+                site.name.bright_white(),
+                status,
                 "not managed by e2sp".dimmed()
             );
         } else {
@@ -1074,31 +1094,31 @@ pub fn list_sites() {
             if site.has_wordpress {
                 features.push("wp");
             }
-            
+
             // Format the line based on what features exist
             let status = if site.is_active {
                 "(active)".green()
             } else {
                 "(deactivated)".yellow()
             };
-            
+
             if features.is_empty() {
                 // No features, just show name and status
-                println!("  {} - {}",
-                    site.name.bright_white(),
-                    status
-                );
+                println!("  {} - {}", site.name.bright_white(), status);
             } else {
                 // Show features
-                let features_str = features.iter().map(|f| {
-                    match *f {
+                let features_str = features
+                    .iter()
+                    .map(|f| match *f {
                         "ssl" => "ssl".green().to_string(),
                         "wp" => "wp".blue().to_string(),
                         _ => f.to_string(),
-                    }
-                }).collect::<Vec<_>>().join(", ");
-                
-                println!("  {} - {} - {}",
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                println!(
+                    "  {} - {} - {}",
                     site.name.bright_white(),
                     features_str,
                     status
@@ -1106,32 +1126,30 @@ pub fn list_sites() {
             }
         }
     }
-    
+
     println!();
-    
+
     // Print summary
     let total = sites.len();
     let managed = sites.iter().filter(|s| s.is_managed).count();
     let active = sites.iter().filter(|s| s.is_active).count();
     let deactivated = sites.iter().filter(|s| !s.is_active).count();
     let unmanaged = sites.iter().filter(|s| !s.is_managed).count();
-    
+
     println!("{}", "Summary:".bold());
-    println!("  Total sites: {} ({} active, {} deactivated)",
+    println!(
+        "  Total sites: {} ({} active, {} deactivated)",
         total.to_string().bright_white(),
         active.to_string().green(),
-        deactivated.to_string().yellow());
-    
+        deactivated.to_string().yellow()
+    );
+
     if managed > 0 {
-        println!("  Managed by e2sp: {}",
-            managed.to_string().cyan()
-        );
+        println!("  Managed by e2sp: {}", managed.to_string().cyan());
     }
-    
+
     if unmanaged > 0 {
-        println!("  Not managed by e2sp: {}",
-            unmanaged.to_string().dimmed()
-        );
+        println!("  Not managed by e2sp: {}", unmanaged.to_string().dimmed());
     }
 }
 
@@ -1282,26 +1300,32 @@ pub fn list_sites() {
 /// # See Also
 ///
 /// * [`put_wordpress_in_site_directory`] - Core WordPress installation logic
-/// * [`create_wordpress_database`] - Database creation with retry logic
-/// * [`create_wp_config_file`] - Configuration file generation
+/// * [`crate::utils::db::create_wordpress_database`] - Database creation with retry logic
+/// * [`crate::utils::sites::create_wp_config_file`] - Configuration file generation
 /// * [`spawn_site`] - Creates new sites with WordPress from scratch
 fn update_with_wordpress(nginx_config: &nginx::config::NginxConfig) -> Result<(), ()> {
     let site_name = &nginx_config.site_name;
-    
+
     // Pre-installation check: Verify WordPress is not already installed
     let wp_config_path = format!("{}/wp-config.php", nginx_config.root);
     if Path::new(&wp_config_path).exists() {
-        eprintln!("✗ WordPress seems to already exist for site '{}'. Cannot update.", site_name);
+        eprintln!(
+            "✗ WordPress seems to already exist for site '{}'. Cannot update.",
+            site_name
+        );
         eprintln!("  Found existing wp-config.php at: {}", wp_config_path);
         return Err(());
     }
-    
+
     // Check if database already exists (would indicate partial or previous installation)
     let db_name = db::create_db_name(site_name);
     match db::database_exists(&db_name, None) {
         Ok(exists) => {
             if exists {
-                eprintln!("✗ Database '{}' already exists for site '{}'. Cannot update.", db_name, site_name);
+                eprintln!(
+                    "✗ Database '{}' already exists for site '{}'. Cannot update.",
+                    db_name, site_name
+                );
                 eprintln!("  This may indicate a previous WordPress installation.");
                 eprintln!("  Please check and clean up any existing database if needed.");
                 return Err(());
@@ -1313,11 +1337,11 @@ fn update_with_wordpress(nginx_config: &nginx::config::NginxConfig) -> Result<()
             return Err(());
         }
     }
-    
+
     println!("Attempting to install WordPress on this site...");
     println!("  Site directory: {}", nginx_config.root);
     println!("  Database name: {}", db_name);
-    
+
     // Step 1: Download and extract WordPress files to site directory
     match put_wordpress_in_site_directory(nginx_config.root.as_str()) {
         Ok(()) => {
@@ -1329,12 +1353,12 @@ fn update_with_wordpress(nginx_config: &nginx::config::NginxConfig) -> Result<()
             return Err(());
         }
     }
-    
+
     // Step 2: Create MySQL database for WordPress
     match db::create_wordpress_database(&db_name, false) {
         Ok(created_db_name) => {
             println!("✓ Database '{}' created successfully", created_db_name);
-            
+
             // Note: created_db_name might differ from db_name if a suffix was added
             // due to conflicts, but we use the original for consistency
         }
@@ -1345,7 +1369,7 @@ fn update_with_wordpress(nginx_config: &nginx::config::NginxConfig) -> Result<()
             return Err(());
         }
     }
-    
+
     // Step 3: Generate WordPress configuration file with database credentials
     match sites::create_wp_config_file(
         &nginx_config.root,
@@ -1361,30 +1385,36 @@ fn update_with_wordpress(nginx_config: &nginx::config::NginxConfig) -> Result<()
         Err(e) => {
             eprintln!("✗ Failed to create wp-config.php file: {}", e);
             eprintln!("  Attempting to clean up database...");
-            
+
             // Rollback: Remove the database since configuration failed
             match db::drop_database(&db_name) {
                 Ok(()) => {
                     println!("  Database '{}' has been removed.", db_name);
                 }
                 Err(drop_err) => {
-                    eprintln!("  WARNING: Failed to remove database '{}': {}", db_name, drop_err);
+                    eprintln!(
+                        "  WARNING: Failed to remove database '{}': {}",
+                        db_name, drop_err
+                    );
                     eprintln!("  Manual cleanup of the database may be required.");
                 }
             }
-            
+
             eprintln!("  WordPress files remain in the directory and need manual cleanup.");
             return Err(());
         }
     }
-    
+
     println!("✓ WordPress successfully installed on site '{}'", site_name);
-    println!("");
+    println!();
     println!("  Next steps:");
-    println!("  1. Navigate to http://{} to complete WordPress setup", site_name);
+    println!(
+        "  1. Navigate to http://{} to complete WordPress setup",
+        site_name
+    );
     println!("  2. Follow the installation wizard to set up your admin account");
     println!("  3. Configure your site settings and install themes/plugins as needed");
-    
+
     Ok(())
 }
 
@@ -1496,43 +1526,51 @@ fn update_with_wordpress(nginx_config: &nginx::config::NginxConfig) -> Result<()
 /// * [`validate_nginx_configuration`] - Validates Nginx syntax
 fn update_with_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), ()> {
     let site_name = &nginx_config.site_name;
-    
+
     // Pre-flight check: Verify SSL is not already enabled
     // Safe to call unwrap here as ssl_root is Some when ssl is true in the config
     let ssl_root = nginx_config.ssl_root.as_ref().unwrap();
-    
+
     // Check both certificate files and nginx config for existing SSL
-    if ssl::check_if_ssl_files_exist(ssl_root) || 
-       check_if_https_in_nginx_config_file(&nginx_config.nginx_config_file_path) {
-        eprintln!("✗ SSL seems to already exist for site '{}'. Cannot update.", site_name);
+    if ssl::check_if_ssl_files_exist(ssl_root)
+        || check_if_https_in_nginx_config_file(&nginx_config.nginx_config_file_path)
+    {
+        eprintln!(
+            "✗ SSL seems to already exist for site '{}'. Cannot update.",
+            site_name
+        );
         return Err(());
     }
-    
-    println!("Attempting to enable SSL for this site...");
-    
-    // Backup current nginx configuration for potential rollback
-    let original_nginx_config_file_content = match fs::read_to_string(&nginx_config.nginx_config_file_path) {
-        Ok(content) => content,
-        Err(e) => {
-            eprintln!("✗ Failed to read existing Nginx configuration file for site '{}': {}", site_name, e);
-            eprintln!("  Cannot proceed with SSL update without backup.");
-            return Err(());
-        }
-    };
 
-        // Create SSL directory
-        match sites::create_directory_if_not_exists(ssl_root, Some(0o750)) {
-            Ok(()) => {
-                println!("✓ SSL directory created successfully");
-            }
+    println!("Attempting to enable SSL for this site...");
+
+    // Backup current nginx configuration for potential rollback
+    let original_nginx_config_file_content =
+        match fs::read_to_string(&nginx_config.nginx_config_file_path) {
+            Ok(content) => content,
             Err(e) => {
-                eprintln!("✗ Failed to create SSL directory: {}", e);
+                eprintln!(
+                    "✗ Failed to read existing Nginx configuration file for site '{}': {}",
+                    site_name, e
+                );
+                eprintln!("  Cannot proceed with SSL update without backup.");
                 return Err(());
             }
+        };
+
+    // Create SSL directory
+    match sites::create_directory_if_not_exists(ssl_root, Some(0o750)) {
+        Ok(()) => {
+            println!("✓ SSL directory created successfully");
         }
+        Err(e) => {
+            eprintln!("✗ Failed to create SSL directory: {}", e);
+            return Err(());
+        }
+    }
 
     // Generate SSL certificates via Let's Encrypt
-    match ssl::generate_ssl(&nginx_config) {
+    match ssl::generate_ssl(nginx_config) {
         Ok(()) => {
             println!("✓ SSL certificates generated and installed successfully");
             let https_config = nginx_config.generate_config(nginx::config::NginxProtocol::Https);
@@ -1551,7 +1589,6 @@ fn update_with_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), ()> 
             }
         }
         Err(e) => {
-     
             eprintln!("✗ SSL generation failed: {}", e);
             remove_dir(ssl_root).unwrap_or(());
             return Err(());
@@ -1563,33 +1600,51 @@ fn update_with_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), ()> 
 
     // Generate HTTPS server block configuration
     let https_config = nginx_config.generate_config(nginx::config::NginxProtocol::Https);
-    
+
     // Append HTTPS configuration to existing nginx config file
     match append_to_nginx_file(&nginx_config.nginx_config_file_path, &https_config) {
         Ok(()) => {
             println!("✓ Nginx configuration file updated for HTTPS successfully");
         }
         Err(e) => {
-            eprintln!("✗ Failed to update Nginx configuration file for HTTPS: {}", e);
-            
+            eprintln!(
+                "✗ Failed to update Nginx configuration file for HTTPS: {}",
+                e
+            );
+
             // Attempt to revert to original configuration
             println!("Attempting to revert Nginx configuration...");
-            if let Err(err) = fs::write(&nginx_config.nginx_config_file_path, &original_nginx_config_file_content) {
-                eprintln!("✗ CRITICAL: Failed to revert Nginx configuration file: {}", err);
+            if let Err(err) = fs::write(
+                &nginx_config.nginx_config_file_path,
+                &original_nginx_config_file_content,
+            ) {
+                eprintln!(
+                    "✗ CRITICAL: Failed to revert Nginx configuration file: {}",
+                    err
+                );
                 eprintln!("  Manual intervention may be required to restore the configuration.");
             }
             return Err(());
         }
     }
-    
+
     // Validate the updated nginx configuration
     if let Err(e) = validate_nginx_configuration() {
-        eprintln!("✗ Nginx configuration validation failed after SSL update: {}", e);
+        eprintln!(
+            "✗ Nginx configuration validation failed after SSL update: {}",
+            e
+        );
         println!("Attempting to revert Nginx configuration...");
-        
+
         // Revert to backed up configuration
-        if let Err(err) = fs::write(&nginx_config.nginx_config_file_path, original_nginx_config_file_content) {
-            eprintln!("✗ CRITICAL: Failed to revert Nginx configuration file: {}", err);
+        if let Err(err) = fs::write(
+            &nginx_config.nginx_config_file_path,
+            original_nginx_config_file_content,
+        ) {
+            eprintln!(
+                "✗ CRITICAL: Failed to revert Nginx configuration file: {}",
+                err
+            );
             eprintln!("  The Nginx configuration may be in an invalid state.");
             eprintln!("  Manual intervention required to fix the configuration.");
         } else {
@@ -1597,7 +1652,7 @@ fn update_with_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), ()> 
         }
         return Err(());
     }
-    
+
     println!("✓ SSL successfully enabled for site '{}'", site_name);
     Ok(())
 }

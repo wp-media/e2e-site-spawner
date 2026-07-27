@@ -284,18 +284,18 @@ fn create_connection(config: &DbConfig) -> Result<Conn, DbError> {
     // For root user, use Unix socket authentication
     if config.user == "root" {
         // Try common socket paths
-        let socket_paths = vec![
-            "/var/run/mysqld/mysqld.sock",     // Ubuntu/Debian default
-            "/tmp/mysql.sock",                  // macOS default
-            "/var/lib/mysql/mysql.sock",       // CentOS/RHEL default
-            "/var/run/mysql/mysql.sock",       // Alternative path
+        let socket_paths = [
+            "/var/run/mysqld/mysqld.sock", // Ubuntu/Debian default
+            "/tmp/mysql.sock",             // macOS default
+            "/var/lib/mysql/mysql.sock",   // CentOS/RHEL default
+            "/var/run/mysql/mysql.sock",   // Alternative path
         ];
-        
+
         // Find the first existing socket
         let socket_path = socket_paths
             .iter()
             .find(|path| std::path::Path::new(path).exists());
-        
+
         match socket_path {
             Some(socket) => {
                 // Use socket authentication for root
@@ -304,7 +304,7 @@ fn create_connection(config: &DbConfig) -> Result<Conn, DbError> {
                     .user(Some(&config.user))
                     // No password needed for socket auth
                     .db_name(None::<String>);
-                
+
                 Conn::new(opts).map_err(|e| {
                     // Provide helpful error message
                     if e.to_string().contains("Access denied") {
@@ -325,7 +325,7 @@ fn create_connection(config: &DbConfig) -> Result<Conn, DbError> {
                     .tcp_port(config.port)
                     .user(Some(&config.user))
                     .pass(config.password.as_deref());
-                
+
                 Conn::new(opts).map_err(|e| {
                     DbError::ConnectionError(format!(
                         "Failed to connect as root. Unix socket not found and TCP connection failed. \
@@ -343,7 +343,7 @@ fn create_connection(config: &DbConfig) -> Result<Conn, DbError> {
             .user(Some(&config.user))
             .pass(config.password.as_deref())
             .prefer_socket(false); // Use TCP for non-root users
-        
+
         Conn::new(opts).map_err(|e| DbError::ConnectionError(e.to_string()))
     }
 }
@@ -387,8 +387,7 @@ fn create_database(conn: &mut Conn, db_name: &str) -> Result<(), DbError> {
         db_name, DB_CHARSET, DB_COLLATION
     );
 
-    conn.exec_drop(&create_query, ())
-        .map_err(|e| DbError::from(e))?;
+    conn.exec_drop(&create_query, ()).map_err(DbError::from)?;
 
     // Grant privileges to WordPress user
     let grant_query = format!(
@@ -396,12 +395,11 @@ fn create_database(conn: &mut Conn, db_name: &str) -> Result<(), DbError> {
         db_name, DB_USER, DB_HOST
     );
 
-    conn.exec_drop(&grant_query, ())
-        .map_err(|e| DbError::from(e))?;
+    conn.exec_drop(&grant_query, ()).map_err(DbError::from)?;
 
     // Flush privileges to ensure they take effect immediately
     conn.exec_drop("FLUSH PRIVILEGES", ())
-        .map_err(|e| DbError::from(e))?;
+        .map_err(DbError::from)?;
 
     Ok(())
 }
@@ -447,7 +445,7 @@ fn create_database(conn: &mut Conn, db_name: &str) -> Result<(), DbError> {
 /// # MySQL Reference
 ///
 /// Based on MySQL identifier rules:
-/// https://dev.mysql.com/doc/refman/8.0/en/identifiers.html
+/// <https://dev.mysql.com/doc/refman/8.0/en/identifiers.html>
 pub fn validate_db_name(name: &str) -> Result<(), DbError> {
     if name.is_empty() {
         return Err(DbError::InvalidDatabaseName(
@@ -525,8 +523,7 @@ pub fn drop_database(db_name: &str) -> Result<(), DbError> {
     let config = DbConfig::default();
     let mut conn = create_connection(&config)?;
     let drop_query = format!("DROP DATABASE IF EXISTS `{}`", db_name);
-    conn.exec_drop(&drop_query, ())
-        .map_err(|e| DbError::from(e))?;
+    conn.exec_drop(&drop_query, ()).map_err(DbError::from)?;
 
     Ok(())
 }
@@ -568,7 +565,7 @@ pub fn drop_database(db_name: &str) -> Result<(), DbError> {
 /// // Reuse existing connection for multiple checks
 /// let config = DbConfig::default();
 /// let mut conn = create_connection(&config)?;
-/// 
+///
 /// for db in &["wp_site1", "wp_site2", "wp_site3"] {
 ///     if database_exists(db, Some(&mut conn))? {
 ///         println!("{} exists", db);
@@ -604,7 +601,7 @@ pub fn database_exists(db_name: &str, conn: Option<&mut Conn>) -> Result<bool, D
     };
 
     let query = "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?";
-    let result: Vec<String> = conn.exec(query, (db_name,)).map_err(|e| DbError::from(e))?;
+    let result: Vec<String> = conn.exec(query, (db_name,)).map_err(DbError::from)?;
 
     Ok(!result.is_empty())
 }
@@ -643,7 +640,7 @@ pub fn database_exists(db_name: &str, conn: Option<&mut Conn>) -> Result<bool, D
 /// as this function doesn't check length limits or starting characters
 /// after transformation.
 pub fn create_db_name(site_name: &str) -> String {
-    format!("wp_{}", site_name.replace('.', "_").replace('-', "_"))
+    format!("wp_{}", site_name.replace(['.', '-'], "_"))
 }
 
 // use std::time::Duration;
@@ -661,7 +658,7 @@ mod tests {
         assert!(validate_db_name("test_database").is_ok());
         assert!(validate_db_name("a").is_ok());
         assert!(validate_db_name("_underscore_start").is_ok());
-        
+
         // Additional valid cases
         assert!(validate_db_name("UPPERCASE").is_ok());
         assert!(validate_db_name("MixedCase_123").is_ok());
@@ -672,11 +669,11 @@ mod tests {
     fn test_invalid_db_names() {
         // Empty name
         assert!(validate_db_name("").is_err());
-        
+
         // Starts with number
         assert!(validate_db_name("123_starts_with_number").is_err());
         assert!(validate_db_name("9test").is_err());
-        
+
         // Invalid characters
         assert!(validate_db_name("has-dashes").is_err());
         assert!(validate_db_name("has spaces").is_err());
@@ -685,7 +682,7 @@ mod tests {
         assert!(validate_db_name("emoji😀").is_err());
         assert!(validate_db_name("tab\ttab").is_err());
         assert!(validate_db_name("newline\n").is_err());
-        
+
         // Too long (>64 chars)
         assert!(validate_db_name(&"a".repeat(65)).is_err());
         assert!(validate_db_name(&"x".repeat(100)).is_err());
@@ -732,21 +729,24 @@ mod tests {
         assert_eq!(create_db_name("example.com"), "wp_example_com");
         assert_eq!(create_db_name("sub.example.com"), "wp_sub_example_com");
         assert_eq!(create_db_name("my-site"), "wp_my_site");
-        assert_eq!(create_db_name("test-blog.example.com"), "wp_test_blog_example_com");
-        
+        assert_eq!(
+            create_db_name("test-blog.example.com"),
+            "wp_test_blog_example_com"
+        );
+
         // Edge cases
         assert_eq!(create_db_name(""), "wp_");
-        assert_eq!(create_db_name("..."), "wp____");  // Fixed: wp_ + ___ = wp____
-        assert_eq!(create_db_name("---"), "wp____");  // Fixed: wp_ + ___ = wp____
+        assert_eq!(create_db_name("..."), "wp____"); // Fixed: wp_ + ___ = wp____
+        assert_eq!(create_db_name("---"), "wp____"); // Fixed: wp_ + ___ = wp____
         assert_eq!(create_db_name("site"), "wp_site");
         assert_eq!(create_db_name("UPPERCASE.COM"), "wp_UPPERCASE_COM");
-        
+
         // Additional edge cases to clarify the pattern
-        assert_eq!(create_db_name("."), "wp__");      // wp_ + _ = wp__
-        assert_eq!(create_db_name(".."), "wp___");    // wp_ + __ = wp___
-        assert_eq!(create_db_name("-"), "wp__");      // wp_ + _ = wp__
-        assert_eq!(create_db_name("--"), "wp___");    // wp_ + __ = wp___
-        assert_eq!(create_db_name(".-"), "wp___");    // wp_ + __ = wp___
+        assert_eq!(create_db_name("."), "wp__"); // wp_ + _ = wp__
+        assert_eq!(create_db_name(".."), "wp___"); // wp_ + __ = wp___
+        assert_eq!(create_db_name("-"), "wp__"); // wp_ + _ = wp__
+        assert_eq!(create_db_name("--"), "wp___"); // wp_ + __ = wp___
+        assert_eq!(create_db_name(".-"), "wp___"); // wp_ + __ = wp___
     }
 
     #[test]
@@ -793,14 +793,14 @@ mod tests {
     #[test]
     fn test_db_error_from_mysql_error() {
         // Test error code mapping
-        
+
         // Database exists (1007)
         let mysql_err = mysql::Error::MySqlError(mysql::MySqlError {
             state: "HY000".to_string(),
             code: 1007,
             message: "Can't create database 'test'; database exists".to_string(),
         });
-        
+
         match DbError::from(mysql_err) {
             DbError::DatabaseExists(msg) => {
                 assert!(msg.contains("database exists"));
@@ -814,7 +814,7 @@ mod tests {
             code: 1044,
             message: "Access denied for user".to_string(),
         });
-        
+
         match DbError::from(mysql_err) {
             DbError::PermissionDenied(msg) => {
                 assert!(msg.contains("Access denied"));
@@ -828,7 +828,7 @@ mod tests {
             code: 1064,
             message: "You have an error in your SQL syntax".to_string(),
         });
-        
+
         match DbError::from(mysql_err) {
             DbError::MySqlError(msg) => {
                 assert!(msg.contains("SQL syntax"));
@@ -863,10 +863,13 @@ mod tests {
     #[test]
     #[ignore] // Requires MySQL server
     fn test_create_wordpress_database_without_retry() {
-        let db_name = format!("wp_test_{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs());
+        let db_name = format!(
+            "wp_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        );
 
         // First creation should succeed
         match create_wordpress_database(&db_name, false) {
@@ -884,10 +887,13 @@ mod tests {
     #[test]
     #[ignore] // Requires MySQL server
     fn test_create_wordpress_database_with_retry() {
-        let base_name = format!("wp_test_{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs());
+        let base_name = format!(
+            "wp_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        );
 
         // Create first database
         match create_wordpress_database(&base_name, false) {
@@ -898,7 +904,7 @@ mod tests {
                         assert_ne!(created_name, base_name);
                         assert!(created_name.starts_with(&base_name));
                         assert!(created_name.contains("_1"));
-                        
+
                         // Clean up both
                         let _ = drop_database(&base_name);
                         let _ = drop_database(&created_name);
@@ -915,16 +921,19 @@ mod tests {
     #[test]
     #[ignore] // Requires MySQL server
     fn test_database_exists() {
-        let db_name = format!("wp_test_exists_{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs());
+        let db_name = format!(
+            "wp_test_exists_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        );
 
         // Check non-existent database
         match database_exists(&db_name, None) {
             Ok(exists) => {
                 assert!(!exists, "Database should not exist initially");
-                
+
                 // Create database
                 if create_wordpress_database(&db_name, false).is_ok() {
                     // Check it now exists
@@ -934,10 +943,10 @@ mod tests {
                         }
                         Err(e) => panic!("Failed to check existence: {}", e),
                     }
-                    
+
                     // Clean up
                     let _ = drop_database(&db_name);
-                    
+
                     // Check it's gone
                     match database_exists(&db_name, None) {
                         Ok(exists) => {
@@ -957,11 +966,11 @@ mod tests {
     #[ignore] // Requires MySQL server
     fn test_database_exists_with_connection_reuse() {
         let config = DbConfig::default();
-        
+
         match create_connection(&config) {
             Ok(mut conn) => {
                 let db_names = vec!["information_schema", "mysql", "performance_schema"];
-                
+
                 for db_name in db_names {
                     match database_exists(db_name, Some(&mut conn)) {
                         Ok(exists) => {
@@ -983,17 +992,20 @@ mod tests {
     #[test]
     #[ignore] // Requires MySQL server
     fn test_drop_database() {
-        let db_name = format!("wp_test_drop_{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs());
+        let db_name = format!(
+            "wp_test_drop_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        );
 
         // Create a database first
         match create_wordpress_database(&db_name, false) {
             Ok(_) => {
                 // Verify it exists
                 assert!(database_exists(&db_name, None).unwrap_or(false));
-                
+
                 // Drop it
                 match drop_database(&db_name) {
                     Ok(()) => {
@@ -1002,7 +1014,7 @@ mod tests {
                     }
                     Err(e) => panic!("Failed to drop database: {}", e),
                 }
-                
+
                 // Drop again should succeed (IF EXISTS clause)
                 match drop_database(&db_name) {
                     Ok(()) => {
@@ -1020,10 +1032,13 @@ mod tests {
     #[test]
     #[ignore] // Requires MySQL server
     fn test_create_database_max_retries() {
-        let base_name = format!("wp_test_max_{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs());
+        let base_name = format!(
+            "wp_test_max_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        );
 
         let config = DbConfig::default();
         let mut conn = match create_connection(&config) {
@@ -1036,11 +1051,11 @@ mod tests {
 
         // Create databases with all possible suffixes (0-20)
         let mut created_dbs = Vec::new();
-        
+
         // Create base database
         if create_wordpress_database(&base_name, false).is_ok() {
             created_dbs.push(base_name.clone());
-            
+
             // Create _1 through _20
             for i in 1..=20 {
                 let name = format!("{}_{}", base_name, i);
@@ -1048,7 +1063,7 @@ mod tests {
                     created_dbs.push(name);
                 }
             }
-            
+
             // Now try to create with retry - should fail after exhausting retries
             match create_wordpress_database(&base_name, true) {
                 Ok(_) => panic!("Should have failed after exhausting retries"),
@@ -1058,7 +1073,7 @@ mod tests {
                 }
                 Err(e) => panic!("Unexpected error: {}", e),
             }
-            
+
             // Clean up all created databases
             for db in created_dbs {
                 let _ = drop_database(&db);
@@ -1073,7 +1088,7 @@ mod tests {
         // Create a site name that would result in a database name > 64 chars
         let long_site = "a".repeat(62); // "wp_" + 62 chars = 65 chars
         let db_name = create_db_name(&long_site);
-        
+
         // The created name will be too long
         assert_eq!(db_name.len(), 65);
         assert!(validate_db_name(&db_name).is_err());
@@ -1083,10 +1098,10 @@ mod tests {
     fn test_error_trait_implementation() {
         // Verify Error trait is properly implemented
         let err = DbError::ConnectionError("test".to_string());
-        
+
         // Should be usable as std::error::Error
         let _: &dyn std::error::Error = &err;
-        
+
         // Display trait should work
         assert!(!err.to_string().is_empty());
     }
@@ -1100,7 +1115,7 @@ mod tests {
             user: "custom_user".to_string(),
             password: Some("password123".to_string()),
         };
-        
+
         assert_eq!(config.host, "custom.host");
         assert_eq!(config.port, 3307);
         assert_eq!(config.user, "custom_user");

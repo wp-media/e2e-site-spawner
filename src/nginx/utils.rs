@@ -119,7 +119,7 @@ fn get_validated_nginx_path(path: &str) -> Result<PathBuf, FileCreationError> {
     };
 
     // 6. Ensure the path is within expected nginx directories (security measure)
-    let valid_prefixes = vec![
+    let valid_prefixes = [
         "/etc/nginx/",
         "/usr/local/nginx/",
         "/var/www/",
@@ -206,16 +206,16 @@ pub fn create_nginx_file(path: &str, content: &str) -> Result<(), FileCreationEr
     let file_path = get_validated_nginx_path(path)?;
 
     // Create parent directory if it doesn't exist
-    if let Some(parent) = file_path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent).map_err(|e| {
-                FileCreationError::DirectoryCreationFailed(format!(
-                    "Cannot create parent directory '{}': {}",
-                    parent.display(),
-                    e
-                ))
-            })?;
-        }
+    if let Some(parent) = file_path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent).map_err(|e| {
+            FileCreationError::DirectoryCreationFailed(format!(
+                "Cannot create parent directory '{}': {}",
+                parent.display(),
+                e
+            ))
+        })?;
     }
 
     // Check if file already exists - FAIL if it does
@@ -254,7 +254,7 @@ pub fn create_nginx_file(path: &str, content: &str) -> Result<(), FileCreationEr
     {
         let permissions = fs::Permissions::from_mode(0o644);
         fs::set_permissions(&file_path, permissions).map_err(|e| {
-            sites::remove_file(&path).unwrap_or(());
+            sites::remove_file(path).unwrap_or(());
             FileCreationError::PermissionSetFailed(format!(
                 "Cannot set permissions on '{}': {}",
                 path, e
@@ -515,7 +515,8 @@ pub fn reload_nginx() -> Result<(), String> {
 ///
 /// The function uses [`std::fs::read_dir`] which is non-recursive by default. This is
 /// intentional to avoid accidentally including files from subdirectories that might
-/// not be actual site configurations. The function also uses [`to_string_lossy`] for
+/// not be actual site configurations. The function also uses
+/// [`std::path::Path::to_string_lossy`] for
 /// path conversion, which means non-UTF-8 filenames will have replacement characters
 /// but won't cause the function to fail.
 ///
@@ -541,7 +542,9 @@ pub fn get_list_of_sites_nginx_file_paths() -> Result<Vec<String>, String> {
                 let file_name = entry.file_name();
                 let file_name_str = file_name.to_string_lossy();
 
-                if !(file_name_str.ends_with(".conf") || file_name_str.ends_with(".conf.deactivated")) {
+                if !(file_name_str.ends_with(".conf")
+                    || file_name_str.ends_with(".conf.deactivated"))
+                {
                     continue;
                 }
                 let file_path = entry.path();
@@ -599,17 +602,16 @@ pub fn get_list_of_sites_nginx_file_paths() -> Result<Vec<String>, String> {
 ///
 /// # Managed Configuration Example
 ///
-/// This configuration would return `true`:
+/// This configuration would return `true` (note the generated marker, which is
+/// what the check actually looks for):
 /// ```nginx
-/// # Managed by e2sp - HTTP configuration
+/// ######E2SP-HTTP-CONFIGURATION######
 /// server {
 ///     listen 80;
 ///     server_name example.com;
 ///     root /var/www/html/example.com;
-///     
-///     # Auto-generated configuration
-///     include /etc/nginx/includes/wordpress.conf;
 /// }
+/// ######E2SP-HTTP-CONFIGURATION######
 /// ```
 ///
 /// # Unmanaged Configuration Example
@@ -684,10 +686,10 @@ pub fn get_list_of_sites_nginx_file_paths() -> Result<Vec<String>, String> {
 ///
 /// # Marker Management
 ///
-/// The markers are defined in [`constants.rs`]:
-/// ```rust
-/// pub const NGINX_HTTP_CONFIG_MARKER: &str = "# Managed by e2sp - HTTP configuration";
-/// pub const NGINX_HTTPS_CONFIG_MARKER: &str = "# Managed by e2sp - HTTPS configuration";
+/// The markers are defined in [`crate::constants`]:
+/// ```text
+/// pub const NGINX_HTTP_CONFIG_MARKER: &str = "######E2SP-HTTP-CONFIGURATION######";
+/// pub const NGINX_HTTPS_CONFIG_MARKER: &str = "######E2SP-HTTPS-CONFIGURATION######";
 /// ```
 ///
 /// # Best Practices
@@ -710,15 +712,15 @@ pub fn get_list_of_sites_nginx_file_paths() -> Result<Vec<String>, String> {
 /// # Integration with Other Functions
 ///
 /// This function works in conjunction with:
-/// - [`spawn_site`]: Adds markers when creating configurations
-/// - [`delete_site`]: Only deletes managed configurations
-/// - [`list_sites`]: Shows management status for all sites
-/// - [`update_site`]: Only updates managed sites
+/// - [`crate::cli::commands::spawn_site`]: Adds markers when creating configurations
+/// - [`crate::cli::commands::delete_site`]: Only deletes managed configurations
+/// - [`crate::cli::commands::list_sites`]: Shows management status for all sites
+/// - [`crate::cli::commands::update_site`]: Only updates managed sites
 ///
 /// # Related Functions
 ///
 /// * [`is_websites_config_file`] - Check if file is a site configuration
-/// * [`is_https_configured`] - Check SSL status
+/// * [`check_if_https_in_nginx_config_file`] - Check SSL status
 /// * [`get_list_of_sites_nginx_file_paths`] - List all configurations
 /// * [`create_nginx_file`] - Create new managed configurations
 ///
@@ -813,7 +815,7 @@ pub fn is_managed_by_this_tool(nginx_config_file_path: &str) -> bool {
 /// - Does not exist
 /// - Is not a regular file (e.g., directory, symlink to non-existent file)
 /// - Cannot be read due to permissions
-/// 
+///
 /// The function returns `false` rather than panicking, allowing graceful handling
 /// of missing or inaccessible configurations.
 ///
@@ -838,7 +840,7 @@ pub fn is_managed_by_this_tool(nginx_config_file_path: &str) -> bool {
 /// # Related Functions
 ///
 /// * [`is_managed_by_this_tool`] - Check if config was created by e2sp
-/// * [`is_https_configured`] - Check SSL status
+/// * [`check_if_https_in_nginx_config_file`] - Check SSL status
 /// * [`get_list_of_sites_nginx_file_paths`] - List all config files
 ///
 /// # Standards References
@@ -1006,17 +1008,17 @@ pub fn is_websites_config_file(nginx_config_file_path: &str) -> bool {
 /// # Integration with Other Commands
 ///
 /// This function is used by:
-/// - [`list_sites`]: Shows (active) or (deactivated) status
-/// - [`deactivate_site`]: Renames `.conf` to `.conf.deactivated`
-/// - [`activate_site`]: Renames `.conf.deactivated` to `.conf`
-/// - [`delete_site`]: Can delete both active and inactive sites
-/// - [`update_site`]: Only updates active sites by default
+/// - [`crate::cli::commands::list_sites`]: Shows (active) or (deactivated) status
+/// - [`crate::cli::commands::deactivate_site`]: Renames `.conf` to `.conf.deactivated`
+/// - [`crate::cli::commands::activate_site`]: Renames `.conf.deactivated` to `.conf`
+/// - [`crate::cli::commands::delete_site`]: Can delete both active and inactive sites
+/// - [`crate::cli::commands::update_site`]: Only updates active sites by default
 ///
 /// # Related Functions
 ///
 /// * [`is_managed_by_this_tool`] - Check if site is e2sp-managed
 /// * [`is_websites_config_file`] - Verify it's a site configuration
-/// * [`is_https_configured`] - Check SSL status
+/// * [`check_if_https_in_nginx_config_file`] - Check SSL status
 /// * [`get_list_of_sites_nginx_file_paths`] - List all config files
 ///
 /// # Alternative Approaches
@@ -1048,7 +1050,7 @@ pub fn is_websites_config_file(nginx_config_file_path: &str) -> bool {
 /// - [Systemd Unit Files](https://www.freedesktop.org/software/systemd/man/systemd.unit.html) - Enable/disable conventions
 pub fn is_active_site(nginx_config_file_path: &str) -> bool {
     let path = Path::new(nginx_config_file_path);
-    
+
     // Check if the file exists and is a regular file
     if !path.exists() || !path.is_file() {
         return false;
@@ -1067,9 +1069,8 @@ pub fn is_active_site(nginx_config_file_path: &str) -> bool {
 /// Checks if HTTPS/SSL is configured in an Nginx configuration file.
 ///
 /// This function provides a simple interface to determine whether a site has HTTPS
-/// enabled by checking for both the HTTPS port listener and SSL certificate configuration.
-/// It serves as an alias to [`is_https_configured`] for backward compatibility and
-/// semantic clarity in different contexts.
+/// enabled by checking for both the HTTPS port listener and SSL certificate
+/// configuration.
 ///
 /// # Arguments
 ///
@@ -1222,16 +1223,15 @@ pub fn is_active_site(nginx_config_file_path: &str) -> bool {
 ///
 /// # Related Functions
 ///
-/// * [`is_https_configured`] - Identical functionality with different name
 /// * [`is_websites_config_file`] - Verify file is a site configuration
 /// * [`is_managed_by_this_tool`] - Check if config was created by e2sp
 /// * [`get_list_of_sites_nginx_file_paths`] - List all configuration files
-/// * [`ssl::generate_ssl`] - Generate SSL certificates for sites
+/// * [`crate::utils::ssl::generate_ssl`] - Generate SSL certificates for sites
 ///
 /// # Implementation Notes
 ///
-/// This function uses [`std::fs::read_to_string`] with [`unwrap_or_default()`],
-/// which means:
+/// This function uses [`std::fs::read_to_string`] with
+/// [`Result::unwrap_or_default`], which means:
 /// - File read errors result in an empty string
 /// - Empty string won't contain the required directives
 /// - Function returns `false` for any read failure
@@ -1262,7 +1262,7 @@ pub fn check_if_https_in_nginx_config_file(nginx_config_file_path: &str) -> bool
     // Read the configuration file, returning empty string if it fails
     // This allows graceful handling of missing or inaccessible files
     let content = fs::read_to_string(nginx_config_file_path).unwrap_or_default();
-    
+
     // Check for both HTTPS port listener and SSL certificate directive
     // Both must be present for a valid HTTPS configuration
     content.contains("listen 443") && content.contains("ssl_certificate")
@@ -1364,7 +1364,7 @@ mod tests {
                 "Path {} should be rejected for wrong extension",
                 path
             );
-            
+
             if let Err(FileCreationError::InvalidPath(msg)) = result {
                 assert!(
                     msg.contains(".conf"),
@@ -1432,10 +1432,13 @@ mod tests {
     #[test]
     fn test_create_nginx_file_various_configs() {
         let test_dir = create_test_dir();
-        
+
         let test_cases = vec![
             ("minimal.conf", "server { listen 80; }"),
-            ("with_location.conf", "location /api { proxy_pass http://backend; }"),
+            (
+                "with_location.conf",
+                "location /api { proxy_pass http://backend; }",
+            ),
             (
                 "full.conf",
                 r#"server {
@@ -1445,7 +1448,7 @@ mod tests {
                     location / {
                         try_files $uri $uri/ =404;
                     }
-                }"#
+                }"#,
             ),
         ];
 
@@ -1453,7 +1456,7 @@ mod tests {
             let file_path = test_dir.join(filename);
             let result = create_nginx_file(file_path.to_str().unwrap(), content);
             assert!(result.is_ok(), "Failed to create {}", filename);
-            
+
             let written = fs::read_to_string(&file_path).unwrap();
             assert_eq!(written, content);
         }
@@ -1520,7 +1523,7 @@ mod tests {
         // Try to create same file again - should fail
         let result2 = create_nginx_file(file_path.to_str().unwrap(), content);
         assert!(result2.is_err());
-        
+
         if let Err(FileCreationError::FileWriteFailed(msg)) = result2 {
             assert!(
                 msg.contains("already exists"),
@@ -1543,7 +1546,7 @@ mod tests {
         let result = create_nginx_file(nested_path.to_str().unwrap(), content);
         assert!(result.is_ok());
         assert!(nested_path.exists());
-        
+
         // Verify all parent directories were created
         assert!(nested_path.parent().unwrap().exists());
 
@@ -1584,10 +1587,10 @@ mod tests {
     fn test_multiple_appends() {
         let test_dir = create_test_dir();
         let file_path = test_dir.join("test.conf");
-        
+
         // Create initial file
         create_nginx_file(file_path.to_str().unwrap(), "server {").unwrap();
-        
+
         // Append multiple times
         let appends = vec![
             "    listen 80;",
@@ -1597,13 +1600,13 @@ mod tests {
             "    }",
             "}",
         ];
-        
+
         for content in &appends {
             append_to_nginx_file(file_path.to_str().unwrap(), content).unwrap();
         }
-        
+
         let final_content = fs::read_to_string(&file_path).unwrap();
-        
+
         // Each append should be on its own line
         let lines: Vec<&str> = final_content.lines().collect();
         assert_eq!(lines[0], "server {");
@@ -1622,7 +1625,7 @@ mod tests {
 
         let result = append_to_nginx_file(file_path.to_str().unwrap(), "content");
         assert!(result.is_err());
-        
+
         if let Err(FileCreationError::FileWriteFailed(msg)) = result {
             assert!(
                 msg.contains("Cannot open file"),
@@ -1646,7 +1649,7 @@ mod tests {
 
         // Try to append various empty contents
         let empty_contents = vec!["", "  ", "\n\n", "\t"];
-        
+
         for content in empty_contents {
             let result = append_to_nginx_file(file_path.to_str().unwrap(), content);
             assert!(
@@ -1669,7 +1672,7 @@ mod tests {
             "/home/user/test.conf",
             "/tmp/test.txt",
         ];
-        
+
         for path in invalid_paths {
             let result = append_to_nginx_file(path, "server { }");
             assert!(result.is_err(), "Path {} should be rejected", path);
@@ -1684,18 +1687,18 @@ mod tests {
         let test_dir = create_test_dir();
         let file_path = test_dir.join("workflow.conf");
         let path_str = file_path.to_str().unwrap();
-        
+
         // Step 1: Create initial config
         let initial = "server {\n    listen 80;\n    server_name example.com;";
         create_nginx_file(path_str, initial).unwrap();
-        
+
         // Step 2: Add location block
         let location = "    location / {\n        try_files $uri $uri/ =404;\n    }";
         append_to_nginx_file(path_str, location).unwrap();
-        
+
         // Step 3: Close server block
         append_to_nginx_file(path_str, "}").unwrap();
-        
+
         // Verify final structure
         let final_content = fs::read_to_string(&file_path).unwrap();
         assert!(final_content.contains("server {"));
@@ -1711,35 +1714,35 @@ mod tests {
     fn test_concurrent_operations() {
         use std::sync::{Arc, Barrier};
         use std::thread;
-        
+
         let test_dir = create_test_dir();
         let file_path = Arc::new(test_dir.join("concurrent.conf"));
         let barrier = Arc::new(Barrier::new(2));
-        
+
         // Create initial file
         create_nginx_file(file_path.to_str().unwrap(), "server { listen 80; }").unwrap();
-        
+
         let path1 = Arc::clone(&file_path);
         let barrier1 = Arc::clone(&barrier);
         let handle1 = thread::spawn(move || {
             barrier1.wait();
             append_to_nginx_file(path1.to_str().unwrap(), "# Thread 1")
         });
-        
+
         let path2 = Arc::clone(&file_path);
         let barrier2 = Arc::clone(&barrier);
         let handle2 = thread::spawn(move || {
             barrier2.wait();
             append_to_nginx_file(path2.to_str().unwrap(), "# Thread 2")
         });
-        
+
         let result1 = handle1.join().unwrap();
         let result2 = handle2.join().unwrap();
-        
+
         // Both should succeed
         assert!(result1.is_ok());
         assert!(result2.is_ok());
-        
+
         // File should contain both appends
         let content = fs::read_to_string(file_path.as_ref()).unwrap();
         assert!(content.contains("# Thread 1"));
@@ -1749,7 +1752,7 @@ mod tests {
     }
 
     // ===== Nginx Reload Tests =====
-    
+
     /// Tests reload_nginx with mock (actual test would require nginx)
     #[test]
     #[ignore] // Requires nginx to be installed
@@ -1757,18 +1760,19 @@ mod tests {
         use tempfile::TempDir;
         // This test would only work on systems with nginx installed
         // and proper permissions
-        
+
         // Create a test config first
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("test.conf");
         create_nginx_file(
             config_path.to_str().unwrap(),
-            "server { listen 8888; server_name test.local; }"
-        ).unwrap();
-        
+            "server { listen 8888; server_name test.local; }",
+        )
+        .unwrap();
+
         // Try to reload (will fail without proper setup)
         let result = reload_nginx();
-        
+
         // We can't assert success without nginx, but function should return Result
         match result {
             Ok(()) => println!("Nginx reloaded successfully"),

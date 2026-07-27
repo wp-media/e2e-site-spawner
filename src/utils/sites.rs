@@ -163,7 +163,7 @@ fn is_step_group_reverted(step: &SpawnSteps, reverted_steps: &[SpawnSteps]) -> b
 /// rollback process, ensuring maximum cleanup even in error conditions.
 pub fn revert_site_spawn(
     site_name: &str,
-    steps: &Vec<SpawnSteps>,
+    steps: &[SpawnSteps],
     nginx_config: &nginx::config::NginxConfig,
 ) {
     eprintln!("✗ Site creation failed, reverting changes...");
@@ -197,7 +197,7 @@ pub fn revert_site_spawn(
             }
             SpawnSteps::CreateSSLDirectory => {
                 println!("Reverting: Deleting SSL directory for site: {}", site_name);
-                remove_directory(&nginx_config.ssl_root.as_ref().unwrap()).unwrap_or_else(|e| {
+                remove_directory(nginx_config.ssl_root.as_ref().unwrap()).unwrap_or_else(|e| {
                     eprintln!(
                         "✗ Failed to delete SSL directory for site: {}: {}",
                         site_name, e
@@ -207,7 +207,7 @@ pub fn revert_site_spawn(
             }
             SpawnSteps::CreateSSL => {
                 println!("Reverting: Deleting SSL directory for site: {}", site_name);
-                remove_directory(&nginx_config.ssl_root.as_ref().unwrap()).unwrap_or_else(|e| {
+                remove_directory(nginx_config.ssl_root.as_ref().unwrap()).unwrap_or_else(|e| {
                     eprintln!(
                         "✗ Failed to delete SSL directory for site: {}: {}",
                         site_name, e
@@ -395,7 +395,8 @@ pub fn create_wp_config_file(
 /// * `db_user` - Username to replace "username_here"
 /// * `db_password` - Password to replace "password_here"
 /// * `db_host` - Host to replace "localhost"
-/// * `db_charset` - Character set to replace "utf8"
+/// * `_db_charset` - Reserved for a future custom charset; currently unused.
+///   WordPress >= 6.9 defaults to utf8mb4, so the sample's charset is left as-is.
 /// * `wp_config_sample` - The template content from wp-config-sample.php
 ///
 /// # Returns
@@ -415,8 +416,10 @@ pub fn create_wp_config_file(
 /// - `username_here` → database username
 /// - `password_here` → database password
 /// - `localhost` → database host
-/// - `utf8` → database charset (typically utf8mb4)
 /// - `put your unique phrase here` → unique 64-char salt keys
+///
+/// The sample's `DB_CHARSET` is intentionally left untouched (WordPress >= 6.9
+/// defaults to utf8mb4).
 ///
 /// # Examples
 ///
@@ -445,9 +448,9 @@ pub fn generate_wp_config_content_from_sample(
         .replace("username_here", db_user)
         .replace("password_here", db_password)
         .replace("localhost", db_host);
-        // Removing charset replacement since WordPress 6.9 defaults to utf8mb4
-        // TODO: Refactor to allow custom charset if needed in future or simply remove parameter from this function
-        // .replace("utf8", db_charset);
+    // Removing charset replacement since WordPress 6.9 defaults to utf8mb4
+    // TODO: Refactor to allow custom charset if needed in future or simply remove parameter from this function
+    // .replace("utf8", db_charset);
     // Add security keys
     loop {
         let placeholder = "put your unique phrase here";
@@ -548,7 +551,7 @@ pub fn create_directory_if_not_exists(
         )));
     }
 
-    fs::create_dir_all(&path).map_err(|e| {
+    fs::create_dir_all(path).map_err(|e| {
         FileCreationError::DirectoryCreationFailed(format!(
             "Cannot create directory '{}': {}",
             dir_path, e
@@ -559,7 +562,7 @@ pub fn create_directory_if_not_exists(
     {
         if let Some(mode) = permissions {
             let permissions = fs::Permissions::from_mode(mode);
-            fs::set_permissions(&path, permissions).map_err(|e| {
+            fs::set_permissions(path, permissions).map_err(|e| {
                 FileCreationError::PermissionSetFailed(format!(
                     "Cannot set permissions on '{}': {}",
                     dir_path, e
@@ -636,7 +639,7 @@ pub fn create_file_with_content_if_not_exists(
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true) // Fails if file exists (atomic check-and-create)
-        .open(&file_path)
+        .open(file_path)
         .map_err(|e| {
             if e.kind() == io::ErrorKind::AlreadyExists {
                 FileCreationError::FileWriteFailed(format!("File already exists: {}.", path))
@@ -654,8 +657,8 @@ pub fn create_file_with_content_if_not_exists(
     {
         if let Some(permissions) = permissions {
             let permissions = fs::Permissions::from_mode(permissions);
-            fs::set_permissions(&file_path, permissions).map_err(|e| {
-                sites::remove_file(&path).unwrap_or(());
+            fs::set_permissions(file_path, permissions).map_err(|e| {
+                sites::remove_file(path).unwrap_or(());
                 FileCreationError::PermissionSetFailed(format!(
                     "Cannot set permissions on '{}': {}",
                     path, e
@@ -808,7 +811,11 @@ pub fn set_path_owner_recursive(
         let walk_path = entry.map_err(|e| {
             FileCreationError::PermissionSetFailed(format!("Walk error at {}: {}", path, e))
         })?;
-        set_path_owner(user_name, group_name, walk_path.path().to_str().unwrap_or(path))?;
+        set_path_owner(
+            user_name,
+            group_name,
+            walk_path.path().to_str().unwrap_or(path),
+        )?;
     }
     Ok(())
 }
@@ -887,7 +894,7 @@ pub fn get_sudo_user() -> String {
 pub fn remove_directory(dir_path: &str) -> Result<(), FileCreationError> {
     let path = Path::new(&dir_path);
     if path.exists() {
-        fs::remove_dir_all(&path).map_err(|e| {
+        fs::remove_dir_all(path).map_err(|e| {
             FileCreationError::DirectoryCreationFailed(format!(
                 "Cannot remove directory '{}': {}",
                 dir_path, e
@@ -907,7 +914,7 @@ pub fn remove_directory(dir_path: &str) -> Result<(), FileCreationError> {
 /// # Arguments
 ///
 /// * `nginx_config` - The Nginx configuration object containing the site's root
-///                    directory path and configuration file path.
+///   directory path and configuration file path.
 ///
 /// # Returns
 ///
@@ -995,9 +1002,9 @@ pub fn remove_directory(dir_path: &str) -> Result<(), FileCreationError> {
 /// # Related Functions
 ///
 /// Works in conjunction with:
-/// - [`spawn_site`] - Uses this to prevent duplicate sites
-/// - [`delete_site`] - Should make this return false after cleanup
-/// - [`update_site`] - Requires this to return true for updates
+/// - [`crate::cli::commands::spawn_site`] - Uses this to prevent duplicate sites
+/// - [`crate::cli::commands::delete_site`] - Should make this return false after cleanup
+/// - [`crate::cli::commands::update_site`] - Requires this to return true for updates
 /// - [`revert_site_spawn`] - Cleans up paths this function checks
 ///
 /// # Security Considerations
@@ -1035,7 +1042,7 @@ pub fn remove_directory(dir_path: &str) -> Result<(), FileCreationError> {
 pub fn check_if_site_exists(nginx_config: &nginx::config::NginxConfig) -> bool {
     let site_root = Path::new(nginx_config.root.as_str());
     let nginx_config_path = Path::new(nginx_config.nginx_config_file_path.as_str());
-    
+
     site_root.exists() || nginx_config_path.exists()
 }
 
@@ -1078,7 +1085,7 @@ pub fn check_if_site_exists(nginx_config: &nginx::config::NginxConfig) -> bool {
 pub fn remove_file(file_path: &str) -> Result<(), FileCreationError> {
     let path = Path::new(&file_path);
     if path.exists() {
-        fs::remove_file(&path).map_err(|e| {
+        fs::remove_file(path).map_err(|e| {
             FileCreationError::FileWriteFailed(format!("Cannot remove file '{}': {}", file_path, e))
         })?;
     }
@@ -1088,10 +1095,10 @@ pub fn remove_file(file_path: &str) -> Result<(), FileCreationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
     #[allow(unused_imports)]
     use std::io::Write;
+    use tempfile::TempDir;
 
     // ===== Directory Management Tests =====
 
@@ -1201,10 +1208,7 @@ mod tests {
             None,
         );
         assert!(result.is_err());
-        assert!(matches!(
-            result,
-            Err(FileCreationError::FileWriteFailed(_))
-        ));
+        assert!(matches!(result, Err(FileCreationError::FileWriteFailed(_))));
 
         // Verify original content unchanged
         let content = fs::read_to_string(&file_path).unwrap();
@@ -1219,12 +1223,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("perm_file.txt");
 
-        create_file_with_content_if_not_exists(
-            file_path.to_str().unwrap(),
-            "test",
-            Some(0o600),
-        )
-        .unwrap();
+        create_file_with_content_if_not_exists(file_path.to_str().unwrap(), "test", Some(0o600))
+            .unwrap();
 
         let metadata = fs::metadata(&file_path).unwrap();
         assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
@@ -1235,11 +1235,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("empty.txt");
 
-        let result = create_file_with_content_if_not_exists(
-            file_path.to_str().unwrap(),
-            "",
-            None,
-        );
+        let result = create_file_with_content_if_not_exists(file_path.to_str().unwrap(), "", None);
         assert!(result.is_ok());
         assert!(file_path.exists());
 
@@ -1329,7 +1325,10 @@ define('SECURE_AUTH_KEY', 'put your unique phrase here');
         assert!(result.contains("'wpuser'"));
         assert!(result.contains("'secret123'"));
         assert!(result.contains("'127.0.0.1'"));
-        assert!(result.contains("'utf8mb4'"));
+        // DB_CHARSET is intentionally NOT substituted (WordPress >= 6.9 defaults
+        // to utf8mb4), so the sample's charset value is left untouched.
+        assert!(result.contains("'utf8'"));
+        assert!(!result.contains("'utf8mb4'"));
 
         // Check salt keys are replaced
         assert!(!result.contains("put your unique phrase here"));
@@ -1374,12 +1373,12 @@ define('NONCE_SALT',       'put your unique phrase here');
         for line in lines {
             if line.contains("define(") && line.contains("_KEY") || line.contains("_SALT") {
                 // Extract the key value between quotes
-                if let Some(start) = line.rfind('\'') {
-                    if let Some(end) = line[..start].rfind('\'') {
-                        let key = &line[end + 1..start];
-                        assert_eq!(key.len(), 64, "Salt key should be 64 characters");
-                        keys.push(key);
-                    }
+                if let Some(start) = line.rfind('\'')
+                    && let Some(end) = line[..start].rfind('\'')
+                {
+                    let key = &line[end + 1..start];
+                    assert_eq!(key.len(), 64, "Salt key should be 64 characters");
+                    keys.push(key);
                 }
             }
         }
@@ -1492,24 +1491,45 @@ define('NONCE_SALT',       'put your unique phrase here');
         let mut reverted = vec![];
 
         // Test nginx config group
-        assert!(!is_step_group_reverted(&SpawnSteps::CreateNginxConfig, &reverted));
+        assert!(!is_step_group_reverted(
+            &SpawnSteps::CreateNginxConfig,
+            &reverted
+        ));
 
         reverted.push(SpawnSteps::CreateNginxConfig);
-        assert!(is_step_group_reverted(&SpawnSteps::CreateNginxConfig, &reverted));
-        assert!(is_step_group_reverted(&SpawnSteps::CreateNginxConfigWithSSL, &reverted));
+        assert!(is_step_group_reverted(
+            &SpawnSteps::CreateNginxConfig,
+            &reverted
+        ));
+        assert!(is_step_group_reverted(
+            &SpawnSteps::CreateNginxConfigWithSSL,
+            &reverted
+        ));
 
         // Test site directory group
         reverted.clear();
-        assert!(!is_step_group_reverted(&SpawnSteps::CreateSiteDirectory, &reverted));
+        assert!(!is_step_group_reverted(
+            &SpawnSteps::CreateSiteDirectory,
+            &reverted
+        ));
 
         reverted.push(SpawnSteps::CreateWPConfigFile);
-        assert!(is_step_group_reverted(&SpawnSteps::CreateSiteDirectory, &reverted));
-        assert!(is_step_group_reverted(&SpawnSteps::CreateWPConfigFile, &reverted));
+        assert!(is_step_group_reverted(
+            &SpawnSteps::CreateSiteDirectory,
+            &reverted
+        ));
+        assert!(is_step_group_reverted(
+            &SpawnSteps::CreateWPConfigFile,
+            &reverted
+        ));
 
         // Test SSL directory group
         reverted.clear();
         reverted.push(SpawnSteps::CreateSSL);
-        assert!(is_step_group_reverted(&SpawnSteps::CreateSSLDirectory, &reverted));
+        assert!(is_step_group_reverted(
+            &SpawnSteps::CreateSSLDirectory,
+            &reverted
+        ));
         assert!(is_step_group_reverted(&SpawnSteps::CreateSSL, &reverted));
 
         // Test database (not in a group)
@@ -1610,10 +1630,7 @@ define('AUTH_KEY', 'put your unique phrase here');
         );
 
         assert!(result.is_err());
-        assert!(matches!(
-            result,
-            Err(FileCreationError::FileWriteFailed(_))
-        ));
+        assert!(matches!(result, Err(FileCreationError::FileWriteFailed(_))));
     }
 
     #[test]

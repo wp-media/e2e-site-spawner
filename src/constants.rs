@@ -16,7 +16,7 @@
 //!
 //! ```ignore
 //! use crate::constants::{SITES_PATH, DB_USER};
-//! 
+//!
 //! println!("Sites will be created in: {}", SITES_PATH);
 //! println!("WordPress database user: {}", DB_USER);
 //! ```
@@ -45,7 +45,7 @@
 /// - Directory must exist and be writable by the web server user
 /// - Typically owned by `www-data` or `nginx` user
 /// - Recommended permissions: 755
-pub const SITES_PATH: &'static str = "/var/www/html";
+pub const SITES_PATH: &str = "/var/www/html";
 
 /// Base directory for SSL certificate storage.
 ///
@@ -70,7 +70,7 @@ pub const SITES_PATH: &'static str = "/var/www/html";
 /// - Should have restricted permissions (typically 700)
 /// - Only readable by root and nginx process
 /// - Contains sensitive private key material
-pub const SITES_SSL_PATH: &'static str = "/etc/nginx/ssl";
+pub const SITES_SSL_PATH: &str = "/etc/nginx/ssl";
 
 /// Directory for Nginx site configuration files.
 ///
@@ -90,7 +90,7 @@ pub const SITES_SSL_PATH: &'static str = "/etc/nginx/ssl";
 /// ```nginx
 /// include /etc/nginx/conf.d/*.conf;
 /// ```
-pub const NGINX_CONF_D_PATH: &'static str = "/etc/nginx/conf.d";
+pub const NGINX_CONF_D_PATH: &str = "/etc/nginx/conf.d";
 
 /// HTTP configuration template for Nginx sites.
 ///
@@ -110,7 +110,7 @@ pub const NGINX_CONF_D_PATH: &'static str = "/etc/nginx/conf.d";
 /// - PHP-FPM integration for WordPress
 /// - Standard WordPress rewrite rules
 /// - Security headers and restrictions
-pub const NGINX_HTTP_TEMPLATE: &'static str = include_str!("./assets/http.conf.template");
+pub const NGINX_HTTP_TEMPLATE: &str = include_str!("./assets/http.conf.template");
 
 /// HTTPS configuration template for Nginx sites with SSL.
 ///
@@ -133,7 +133,7 @@ pub const NGINX_HTTP_TEMPLATE: &'static str = include_str!("./assets/http.conf.t
 /// - HTTP/2 support
 /// - Security headers (HSTS, etc.)
 /// - HTTP to HTTPS redirect
-pub const NGINX_HTTPS_TEMPLATE: &'static str = include_str!("./assets/https.conf.template");
+pub const NGINX_HTTPS_TEMPLATE: &str = include_str!("./assets/https.conf.template");
 
 /// Marker comment identifying HTTP configurations.
 ///
@@ -151,7 +151,7 @@ pub const NGINX_HTTPS_TEMPLATE: &'static str = include_str!("./assets/https.conf
 ///     # ... configuration ...
 /// }
 /// ```
-pub const NGINX_HTTP_CONFIG_MARKER: &'static str = "######E2SP-HTTP-CONFIGURATION######";
+pub const NGINX_HTTP_CONFIG_MARKER: &str = "######E2SP-HTTP-CONFIGURATION######";
 
 /// Marker comment identifying HTTPS configurations.
 ///
@@ -169,7 +169,7 @@ pub const NGINX_HTTP_CONFIG_MARKER: &'static str = "######E2SP-HTTP-CONFIGURATIO
 ///     # ... HTTPS configuration ...
 /// }
 /// ```
-pub const NGINX_HTTPS_CONFIG_MARKER: &'static str = "######E2SP-HTTPS-CONFIGURATION######";
+pub const NGINX_HTTPS_CONFIG_MARKER: &str = "######E2SP-HTTPS-CONFIGURATION######";
 
 /// Default HTML index file template.
 ///
@@ -181,14 +181,14 @@ pub const NGINX_HTTPS_CONFIG_MARKER: &'static str = "######E2SP-HTTPS-CONFIGURAT
 /// Loaded at compile time from `./assets/default-index.html`
 ///
 /// # Usage
-/// Used when spawning a site with `--html` flag, creating a static HTML site
-/// instead of installing WordPress.
+/// Used when spawning a site with the `--no-wp` flag, creating a static HTML
+/// site instead of installing WordPress.
 ///
 /// # Features
 /// - Responsive design
 /// - E2E Site Spawner branding
 /// - Instructions for next steps
-pub const HTML_DEFAULT_INDEX_FILE: &'static str = include_str!("./assets/default-index.html");
+pub const HTML_DEFAULT_INDEX_FILE: &str = include_str!("./assets/default-index.html");
 
 // ============================================================================
 // WordPress Configuration Constants
@@ -213,7 +213,7 @@ pub const HTML_DEFAULT_INDEX_FILE: &'static str = include_str!("./assets/default
 /// For specific versions, use:
 /// - `https://wordpress.org/wordpress-{version}.tar.gz`
 /// - Example: `https://wordpress.org/wordpress-6.4.1.tar.gz`
-pub const LATEST_WORDPRESS_URL: &'static str = "https://wordpress.org/latest.tar.gz";
+pub const LATEST_WORDPRESS_URL: &str = "https://wordpress.org/latest.tar.gz";
 
 // ============================================================================
 // Database Configuration Constants
@@ -230,7 +230,7 @@ pub const LATEST_WORDPRESS_URL: &'static str = "https://wordpress.org/latest.tar
 /// # Security Warning
 /// In production environments, consider using a dedicated admin user
 /// instead of root for better security isolation.
-pub const DB_ROOT_USER: &'static str = "root";
+pub const DB_ROOT_USER: &str = "root";
 
 /// WordPress database user name.
 ///
@@ -248,7 +248,7 @@ pub const DB_ROOT_USER: &'static str = "root";
 /// - Should be created with a strong password in production
 /// - Limited to localhost connections only
 /// - Cannot access system databases
-pub const DB_USER: &'static str = "wordpress";
+pub const DB_USER: &str = "wordpress";
 
 /// Default password for the WordPress database user.
 ///
@@ -267,7 +267,7 @@ pub const DB_USER: &'static str = "wordpress";
 /// - Be at least 12 characters long
 /// - Include mixed case, numbers, and special characters
 /// - Be unique per installation
-pub const DB_PASSWORD: &'static str = "pleaseadvise";
+pub const DB_PASSWORD: &str = "pleaseadvise";
 
 /// Database server hostname or IP address.
 ///
@@ -285,7 +285,7 @@ pub const DB_PASSWORD: &'static str = "pleaseadvise";
 /// # Connection Method
 /// - `localhost` uses Unix socket (faster for local connections)
 /// - IP addresses use TCP/IP connection
-pub const DB_HOST: &'static str = "localhost";
+pub const DB_HOST: &str = "localhost";
 
 /// MySQL/MariaDB server port number.
 ///
@@ -322,7 +322,7 @@ pub const DB_PORT: u16 = 3306;
 /// Requires:
 /// - MySQL 5.5.3+ or MariaDB 5.5+
 /// - WordPress 4.2+
-pub const DB_CHARSET: &'static str = "utf8mb4";
+pub const DB_CHARSET: &str = "utf8mb4";
 
 /// Collation for WordPress databases.
 ///
@@ -344,4 +344,4 @@ pub const DB_CHARSET: &'static str = "utf8mb4";
 /// # WordPress Compatibility
 /// WordPress works with any utf8mb4 collation, but `utf8mb4_general_ci`
 /// provides the best balance of performance and compatibility.
-pub const DB_COLLATION: &'static str = "utf8mb4_general_ci";
+pub const DB_COLLATION: &str = "utf8mb4_general_ci";

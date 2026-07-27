@@ -70,7 +70,7 @@ const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\n", env!("CARGO_PKG_A
 /// #### `spawn`
 /// Creates new sites with optional features:
 /// - **Required**: Site name (domain)
-/// - **Options**: 
+/// - **Options**:
 ///   - `--ssl`: Enable Let's Encrypt SSL
 ///   - `--no-wp`: Skip WordPress installation
 ///
@@ -286,7 +286,7 @@ pub fn build_cli() -> Command {
 /// use crate::cli::args::get_matches;
 ///
 /// let matches = get_matches();
-/// 
+///
 /// if let Some(spawn_matches) = matches.subcommand_matches("spawn") {
 ///     let site_name = spawn_matches.get_one::<String>("site_name").unwrap();
 ///     let use_ssl = spawn_matches.get_flag("ssl");

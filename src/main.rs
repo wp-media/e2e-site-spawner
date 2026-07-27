@@ -21,7 +21,9 @@ mod cli;
 pub mod constants;
 pub mod nginx;
 pub mod utils;
-use cli::commands::{activate_site, deactivate_site, delete_site, spawn_site, update_site, list_sites};
+use cli::commands::{
+    activate_site, deactivate_site, delete_site, list_sites, spawn_site, update_site,
+};
 use colored::*;
 use std::process;
 
@@ -45,6 +47,8 @@ use std::process;
 /// - `delete` - Removes a site and all associated resources
 /// - `deactivate` - Disables a site without removing files
 /// - `activate` - Re-enables a previously deactivated site
+/// - `update` - Adds WordPress and/or SSL to an existing site
+/// - `list` - Lists all configured sites and their status
 ///
 /// # Exit Codes
 ///
@@ -60,17 +64,8 @@ fn main() {
 
         let site_name = matches.get_one::<String>("site_name").unwrap();
         let ssl = matches.get_flag("ssl");
-        if ssl && !check_if_acme_sh_installed() {
-            println!(
-                "{} 'acme.sh' is not installed or not available for root / sudo. SSL generation requires 'acme.sh' to be installed as root. (Make sure to create symlink as well: 'sudo ln -sf \"/root/acme.sh\" /usr/local/bin/acme.sh')",
-                "❌".bright_yellow()
-            );
-            println!("");
-            println!(
-                "{}  You can install it manually from https://github.com/acmesh-official/acme.sh",
-                "ℹ️".bright_blue()
-            );
-            process::exit(1);
+        if ssl {
+            require_acme_sh();
         }
         let no_wp = matches.get_flag("no-wp");
         spawn_site(site_name, ssl, no_wp);
@@ -90,12 +85,17 @@ fn main() {
 
         let site_name = matches.get_one::<String>("site_name").unwrap();
         activate_site(site_name);
-
     } else if let Some(matches) = matches.subcommand_matches("update") {
-            let site_name = matches.get_one::<String>("site_name").unwrap();
-            let wp = matches.get_flag("wp");
-            let ssl = matches.get_flag("ssl");
-            update_site(site_name, wp, ssl);
+        // Check for root/sudo privileges before executing
+        require_elevated_privileges();
+
+        let site_name = matches.get_one::<String>("site_name").unwrap();
+        let wp = matches.get_flag("wp");
+        let ssl = matches.get_flag("ssl");
+        if ssl {
+            require_acme_sh();
+        }
+        update_site(site_name, wp, ssl);
     } else if matches.subcommand_matches("list").is_some() {
         require_elevated_privileges();
 
@@ -142,6 +142,39 @@ fn require_elevated_privileges() {
         print_privilege_error();
         process::exit(1);
     }
+}
+
+/// Ensures `acme.sh` is available before any SSL operation is attempted.
+///
+/// SSL issuance and installation are delegated to `acme.sh`, which must be
+/// installed **as root** and reachable on `PATH` for `sudo`. Checking up front
+/// keeps the failure fast and actionable instead of surfacing deep inside
+/// [`crate::utils::ssl::generate_ssl`].
+///
+/// # Behavior
+///
+/// - If `acme.sh` responds to `--version`: returns normally.
+/// - Otherwise: prints installation guidance and exits with code 1.
+///
+/// # Used By
+///
+/// Both `spawn --ssl` and `update --ssl`, so the prerequisite is enforced
+/// consistently for every command that can request a certificate.
+fn require_acme_sh() {
+    if check_if_acme_sh_installed() {
+        return;
+    }
+
+    println!(
+        "{} 'acme.sh' is not installed or not available for root / sudo. SSL generation requires 'acme.sh' to be installed as root. (Make sure to create symlink as well: 'sudo ln -sf \"/root/acme.sh\" /usr/local/bin/acme.sh')",
+        "❌".bright_yellow()
+    );
+    println!();
+    println!(
+        "{}  You can install it manually from https://github.com/acmesh-official/acme.sh",
+        "ℹ️".bright_blue()
+    );
+    process::exit(1);
 }
 
 /// Checks if the current process is running as root (UID 0).
@@ -296,9 +329,8 @@ fn print_privilege_error() {
     );
     println!();
     println!(
-        "{} {}",
-        "Please run this command with sudo:".bright_white().bold(),
-        ""
+        "{} ",
+        "Please run this command with sudo:".bright_white().bold()
     );
     println!();
 
@@ -314,9 +346,8 @@ fn print_privilege_error() {
     println!();
 
     println!(
-        "{} {}",
-        "Or, if you're using the root user:".italic().bright_black(),
-        ""
+        "{} ",
+        "Or, if you're using the root user:".italic().bright_black()
     );
     println!();
     println!("  {} {}", "$".bright_green().bold(), command.bright_white());
@@ -381,7 +412,7 @@ fn check_if_acme_sh_installed() -> bool {
 /// Attempts to automatically install acme.sh from the official repository.
 ///
 /// Downloads and installs acme.sh using the official installation script
-/// from https://get.acme.sh. This provides automated SSL certificate
+/// from <https://get.acme.sh>. This provides automated SSL certificate
 /// management through Let's Encrypt.
 ///
 /// # Returns
@@ -391,7 +422,7 @@ fn check_if_acme_sh_installed() -> bool {
 ///
 /// # Installation Process
 ///
-/// 1. Downloads the installation script from https://get.acme.sh
+/// 1. Downloads the installation script from <https://get.acme.sh>
 /// 2. Executes the script with shell
 /// 3. Installs acme.sh to `~/.acme.sh/`
 /// 4. Sets up automatic renewal cron job
@@ -405,7 +436,7 @@ fn check_if_acme_sh_installed() -> bool {
 /// # Security Considerations
 ///
 /// ⚠️ **Warning**: This function downloads and executes a script from the internet.
-/// Ensure you trust the source (https://get.acme.sh) before running.
+/// Ensure you trust the source (<https://get.acme.sh>) before running.
 ///
 /// # Example
 ///
@@ -443,7 +474,7 @@ fn try_acme_sh_installation() -> Result<(), String> {
     println!("{} Attempting to install acme.sh...", "🔄".bright_blue());
 
     let install_output = Command::new("curl")
-        .args(&["https://get.acme.sh", "|", "sh"])
+        .args(["https://get.acme.sh", "|", "sh"])
         .output()
         .map_err(|e| format!("Failed to execute curl command: {}", e))?;
 

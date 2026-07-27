@@ -54,7 +54,7 @@ mod tests {
     fn test_spawn_site_basic_requires_privileges() {
         let mut cmd = cmd!();
         cmd.arg("spawn").arg(TEST_DOMAIN);
-        
+
         if !is_running_as_root() {
             // Without root: expect privilege error
             cmd.assert()
@@ -65,7 +65,7 @@ mod tests {
             // With root: expect domain validation error (invalid_domain has no TLD)
             // or success if domain is valid and system is configured
             let result = cmd.assert();
-            
+
             // The command should at least not fail with privilege error
             let output = String::from_utf8_lossy(&result.get_output().stdout);
             assert!(!output.contains("ELEVATED PRIVILEGES REQUIRED"));
@@ -76,7 +76,7 @@ mod tests {
     fn test_spawn_site_with_valid_domain() {
         let mut cmd = cmd!();
         cmd.arg("spawn").arg(TEST_DOMAIN).arg("--no-wp");
-        
+
         if !is_running_as_root() {
             cmd.assert()
                 .failure()
@@ -86,15 +86,15 @@ mod tests {
             // With root: might succeed or fail based on system state
             // (nginx installed, paths exist, etc.)
             let result = cmd.output().unwrap();
-            
+
             if !result.status.success() {
                 let stderr = String::from_utf8_lossy(&result.stderr);
                 let stdout = String::from_utf8_lossy(&result.stdout);
-                
+
                 // Should NOT be a privilege error
                 assert!(!stdout.contains("ELEVATED PRIVILEGES REQUIRED"));
                 assert!(!stderr.contains("ELEVATED PRIVILEGES REQUIRED"));
-                
+
                 // Might fail for other valid reasons:
                 // - Site already exists
                 // - Nginx not installed
@@ -108,7 +108,7 @@ mod tests {
     fn test_spawn_invalid_domain_with_and_without_root() {
         let mut cmd = cmd!();
         cmd.arg("spawn").arg(INVALID_DOMAIN);
-        
+
         if !is_running_as_root() {
             // Without root: fails with privilege error first
             cmd.assert()
@@ -127,7 +127,7 @@ mod tests {
     fn test_delete_site_behavior() {
         let mut cmd = cmd!();
         cmd.arg("delete").arg(TEST_DOMAIN);
-        
+
         if !is_running_as_root() {
             cmd.assert()
                 .failure()
@@ -136,22 +136,43 @@ mod tests {
         } else {
             // With root: might fail if site doesn't exist
             let result = cmd.output().unwrap();
-            
+
             if !result.status.success() {
                 let stderr = String::from_utf8_lossy(&result.stderr);
                 let stdout = String::from_utf8_lossy(&result.stdout);
-                
+
                 // Should not be privilege error
                 assert!(!stdout.contains("ELEVATED PRIVILEGES REQUIRED"));
-                
+
                 // Likely "site not found" or similar
                 assert!(
-                    stderr.contains("not found") || 
-                    stderr.contains("does not exist") ||
-                    stdout.contains("not found") ||
-                    stdout.contains("does not exist")
+                    stderr.contains("not found")
+                        || stderr.contains("does not exist")
+                        || stdout.contains("not found")
+                        || stdout.contains("does not exist")
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_update_requires_privileges() {
+        let mut cmd = cmd!();
+        cmd.arg("update").arg(TEST_DOMAIN).arg("--wp");
+
+        if !is_running_as_root() {
+            // Without root: must fail with the privilege error, like every other
+            // state-mutating command.
+            cmd.assert()
+                .failure()
+                .code(1)
+                .stdout(predicate::str::contains("ELEVATED PRIVILEGES REQUIRED"));
+        } else {
+            // With root: must NOT be a privilege error (it may still fail for other
+            // reasons, e.g. the site does not exist).
+            let result = cmd.output().unwrap();
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            assert!(!stdout.contains("ELEVATED PRIVILEGES REQUIRED"));
         }
     }
 
@@ -159,43 +180,48 @@ mod tests {
     #[test]
     fn test_complete_lifecycle() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        
+
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         let test_site = format!("test-{}.e2e.rocketlabsqa.ovh", timestamp);
-        
+
         if !is_running_as_root() {
             // Test that all commands fail with privilege error
             let mut spawn_cmd = cmd!();
             spawn_cmd.arg("spawn").arg(&test_site).arg("--no-wp");
-            spawn_cmd.assert()
+            spawn_cmd
+                .assert()
                 .failure()
                 .code(1)
                 .stdout(predicate::str::contains("ELEVATED PRIVILEGES REQUIRED"));
-            
+
             let mut delete_cmd = cmd!();
             delete_cmd.arg("delete").arg(&test_site);
-            delete_cmd.assert()
+            delete_cmd
+                .assert()
                 .failure()
                 .code(1)
                 .stdout(predicate::str::contains("ELEVATED PRIVILEGES REQUIRED"));
         } else {
             // With root: actually test the lifecycle
             println!("Running lifecycle test with root privileges");
-            
+
             // 1. Spawn the site
             let mut spawn_cmd = cmd!();
             spawn_cmd.arg("spawn").arg(&test_site).arg("--no-wp");
-            
+
             let spawn_result = spawn_cmd.output().unwrap();
             if !spawn_result.status.success() {
                 // Print why it failed for debugging
-                eprintln!("Spawn failed: {}", String::from_utf8_lossy(&spawn_result.stderr));
+                eprintln!(
+                    "Spawn failed: {}",
+                    String::from_utf8_lossy(&spawn_result.stderr)
+                );
                 eprintln!("Stdout: {}", String::from_utf8_lossy(&spawn_result.stdout));
-                
+
                 // Common acceptable failures:
                 let stderr = String::from_utf8_lossy(&spawn_result.stderr);
                 assert!(
@@ -205,17 +231,17 @@ mod tests {
                 );
                 return; // Skip rest of test if spawn failed for valid reasons
             }
-            
+
             // 2. Deactivate the site
             let mut deactivate_cmd = cmd!();
             deactivate_cmd.arg("deactivate").arg(&test_site);
             assert!(deactivate_cmd.output().unwrap().status.success());
-            
+
             // 3. Activate the site
             let mut activate_cmd = cmd!();
             activate_cmd.arg("activate").arg(&test_site);
             assert!(activate_cmd.output().unwrap().status.success());
-            
+
             // 4. Delete the site
             let mut delete_cmd = cmd!();
             delete_cmd.arg("delete").arg(&test_site);
@@ -228,7 +254,7 @@ mod tests {
     fn test_ssl_requires_acme_sh() {
         let mut cmd = cmd!();
         cmd.arg("spawn").arg(TEST_DOMAIN).arg("--ssl");
-        
+
         if !is_running_as_root() {
             // Without root: privilege error comes first
             cmd.assert()
@@ -246,10 +272,10 @@ mod tests {
             if !result.status.success() {
                 let output = String::from_utf8_lossy(&result.stdout);
                 let stderr = String::from_utf8_lossy(&result.stderr);
-                
+
                 // Should not be privilege error
                 assert!(!output.contains("ELEVATED PRIVILEGES REQUIRED"));
-                
+
                 // Might fail for SSL-specific reasons
                 println!("SSL spawn failed (expected): {}", stderr);
             }
