@@ -25,6 +25,7 @@
 use crate::constants::{DB_CHARSET, DB_PASSWORD, DB_USER};
 use crate::constants::{
     DB_HOST, HTML_DEFAULT_INDEX_FILE, NGINX_CONF_D_PATH, NGINX_HTTPS_CONFIG_MARKER, SITES_PATH,
+    WEB_SERVER_GROUP, WEB_SERVER_USER,
 };
 use crate::nginx::config::validate_nginx_configuration;
 use crate::nginx::{
@@ -186,7 +187,7 @@ pub const REMOVE_SSL_DIRECTORY: [SpawnSteps; 2] =
 ///
 /// 3. **Directory Creation**
 ///    - Creates site root directory
-///    - Sets ownership to www-data:root
+///    - Sets ownership to www-data:www-data
 ///    - Creates SSL directory if needed
 ///
 /// 4. **SSL Configuration** (if enabled)
@@ -196,9 +197,11 @@ pub const REMOVE_SSL_DIRECTORY: [SpawnSteps; 2] =
 /// 5. **WordPress Installation** (unless disabled)
 ///    - Downloads and extracts WordPress
 ///    - Creates MySQL database
-///    - Generates wp-config.php
+///    - Generates wp-config.php (debug logging on, `FS_METHOD` direct)
+///    - Creates the `wp-content/uploads` directory WordPress does not ship
 ///
 /// 6. **Finalization**
+///    - Re-applies web server ownership to every file just written
 ///    - Reloads Nginx service
 ///    - Reports success
 ///
@@ -214,6 +217,7 @@ pub const REMOVE_SSL_DIRECTORY: [SpawnSteps; 2] =
 /// ```text
 /// /var/www/html/{site_name}/        # Site root
 /// ├── (WordPress files)              # If WordPress enabled
+/// │   └── wp-content/uploads/        # Created here, not shipped by WordPress
 /// └── index.html                     # If static site
 ///
 /// /etc/nginx/conf.d/{site_name}.conf # Nginx config
@@ -225,7 +229,9 @@ pub const REMOVE_SSL_DIRECTORY: [SpawnSteps; 2] =
 ///
 /// # Permissions
 ///
-/// - Site directory: 777 (www-data:root ownership)
+/// - Site directory: 777 (www-data:www-data ownership, applied recursively to
+///   every file once the last one is written)
+/// - `wp-content/uploads`: 755 (www-data:www-data ownership)
 /// - SSL directory: 750 (current_user:root ownership)
 /// - Configuration files: Created with default umask
 ///
@@ -319,15 +325,10 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
     // Phase 3: Create site directory
     match sites::create_directory_if_not_exists(nginx_config.root.as_str(), Some(0o777)) {
         Ok(()) => {
-            // Change ownership of Sites directory www-data:root
-            if sites::set_path_owner_recursive(
-                Some("www-data"),
-                Some("root"),
-                nginx_config.root.as_str(),
-            )
-            .is_err()
-            {
-                eprintln!("✗ Failed to set Sites directory ownership.");
+            // Hand the directory to the web server up front so a static site is
+            // already writable; the tree is re-owned after every file is written.
+            if let Err(e) = sites::set_web_server_ownership(nginx_config.root.as_str()) {
+                eprintln!("✗ Failed to set Sites directory ownership: {}", e);
                 sites::remove_directory(nginx_config.root.as_str()).unwrap_or(());
                 revert_site_spawn(site_name, &steps_completed, &nginx_config);
             }
@@ -451,11 +452,32 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
                 revert_site_spawn(site_name, &steps_completed, &nginx_config);
             }
         }
+
+        // WordPress ships no uploads directory and cannot create one itself while
+        // the tree still belongs to root, so create it before handing the site over.
+        match sites::create_wp_uploads_directory(&nginx_config.root) {
+            Ok(()) => {
+                println!("✓ WordPress uploads directory created successfully");
+            }
+            Err(e) => {
+                eprintln!("✗ Failed to create WordPress uploads directory: {}", e);
+                revert_site_spawn(site_name, &steps_completed, &nginx_config);
+            }
+        }
     } else {
         // Create default index.html for static site
         let path = format!("{}/index.html", nginx_config.root);
         create_file_with_content_if_not_exists(&path, HTML_DEFAULT_INDEX_FILE, None).unwrap_or(());
     }
+
+    // Hand the finished tree to the web server. Everything above was written by
+    // root, and PHP-FPM must own it to write uploads, plugins, themes, and
+    // debug.log.
+    if let Err(e) = sites::set_web_server_ownership(&nginx_config.root) {
+        eprintln!("✗ Failed to set site directory ownership: {}", e);
+        revert_site_spawn(site_name, &steps_completed, &nginx_config);
+    }
+    println!("✓ Site files ownership set to {}", WEB_SERVER_USER);
 
     // Phase 6: Reload Nginx to apply changes
     reload_nginx().unwrap_or_else(|e| {
@@ -1192,14 +1214,21 @@ pub fn list_sites() {
 ///    - Creates wp-config.php with database credentials
 ///    - Generates unique authentication keys and salts
 ///    - Sets WordPress database constants
-///    - Configures debug settings based on environment
+///    - Enables debug logging and `FS_METHOD` direct (see
+///      [`crate::utils::sites::create_wp_config_file`])
+///
+/// 5. **Handover to the Web Server**
+///    - Creates the `wp-content/uploads` directory WordPress does not ship
+///    - Re-owns the whole tree to `www-data:www-data`, without which uploads,
+///      plugin installs, and debug logging fail
 ///
 /// # Files Created/Modified
 ///
 /// ```text
 /// /var/www/html/{site_name}/
 /// ├── wp-admin/                  # WordPress admin files (created)
-/// ├── wp-content/                # Themes, plugins, uploads (created)
+/// ├── wp-content/                # Themes and plugins (created)
+/// │   └── uploads/               # Media directory (created, 755)
 /// ├── wp-includes/               # WordPress core files (created)
 /// ├── wp-config.php              # Database configuration (created)
 /// ├── index.php                  # WordPress entry point (created)
@@ -1404,6 +1433,28 @@ fn update_with_wordpress(nginx_config: &nginx::config::NginxConfig) -> Result<()
             return Err(());
         }
     }
+
+    // Step 4: Create the uploads directory WordPress does not ship
+    if let Err(e) = sites::create_wp_uploads_directory(&nginx_config.root) {
+        eprintln!("✗ Failed to create WordPress uploads directory: {}", e);
+        eprintln!("  WordPress is installed but media uploads will ask for FTP credentials.");
+        return Err(());
+    }
+    println!("✓ WordPress uploads directory created successfully");
+
+    // Step 5: Hand the tree to the web server, which wrote none of these files
+    if let Err(e) = sites::set_web_server_ownership(&nginx_config.root) {
+        eprintln!("✗ Failed to set site directory ownership: {}", e);
+        eprintln!(
+            "  WordPress is installed but its files still belong to root, so uploads,\n  plugin installs, and debug logging will fail. Fix it with:"
+        );
+        eprintln!(
+            "    sudo chown -R {}:{} {}",
+            WEB_SERVER_USER, WEB_SERVER_GROUP, nginx_config.root
+        );
+        return Err(());
+    }
+    println!("✓ Site files ownership set to {}", WEB_SERVER_USER);
 
     println!("✓ WordPress successfully installed on site '{}'", site_name);
     println!();

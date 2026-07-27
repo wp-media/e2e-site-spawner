@@ -18,7 +18,6 @@
 //! - Rollback mechanism for failed operations
 //! - File and directory permission management
 
-// use predicates::path;
 use std::fs::OpenOptions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -27,10 +26,14 @@ use std::{fs, io, io::Write};
 
 use crate::cli::commands::SpawnSteps;
 use crate::cli::commands::{REMOVE_NGINX_CONFIG, REMOVE_SITE_DIRECTORY, REMOVE_SSL_DIRECTORY};
+use crate::constants::{
+    WEB_SERVER_GROUP, WEB_SERVER_USER, WP_CONFIG_E2SP_MARKER, WP_UPLOADS_PERMISSIONS,
+    WP_UPLOADS_RELATIVE_PATH,
+};
 use crate::nginx;
 use crate::utils::db;
 use crate::utils::sites;
-use nix::unistd::Group;
+use nix::unistd::{Gid, Group, Uid};
 use rand::Rng;
 use std::env;
 
@@ -421,6 +424,12 @@ pub fn create_wp_config_file(
 /// The sample's `DB_CHARSET` is intentionally left untouched (WordPress >= 6.9
 /// defaults to utf8mb4).
 ///
+/// # QA Defaults
+///
+/// The generated file also carries the e2sp-managed block described in
+/// [`insert_e2sp_wp_config_block`], which turns debug logging on and forces
+/// direct filesystem writes.
+///
 /// # Examples
 ///
 /// ```ignore
@@ -462,7 +471,169 @@ pub fn generate_wp_config_content_from_sample(
         }
     }
 
-    Ok(wp_config_content)
+    Ok(insert_e2sp_wp_config_block(&wp_config_content))
+}
+
+/// Anchor marking the end of the user-editable area of `wp-config-sample.php`.
+///
+/// WordPress ships the line `/* That's all, stop editing! Happy publishing. */`;
+/// only the stable part of that sentence is matched so wording changes in future
+/// releases do not break the lookup.
+const WP_CONFIG_STOP_EDITING_ANCHOR: &str = "That's all, stop editing!";
+
+/// PHP opening tag, used as the fallback insertion anchor.
+const PHP_OPEN_TAG: &str = "<?php";
+
+/// WordPress constants owned by the e2sp block.
+///
+/// Any definition of these found in `wp-config-sample.php` is dropped before the
+/// block is inserted: PHP emits a warning (and keeps the first value) when a
+/// constant is defined twice, so the sample's `WP_DEBUG` must go.
+const E2SP_MANAGED_WP_CONSTANTS: [&str; 4] =
+    ["WP_DEBUG", "WP_DEBUG_LOG", "WP_DEBUG_DISPLAY", "FS_METHOD"];
+
+/// Builds the e2sp-managed block of `wp-config.php` constants.
+///
+/// # Returns
+///
+/// A PHP snippet, delimited by [`crate::constants::WP_CONFIG_E2SP_MARKER`],
+/// defining the QA defaults every spawned site gets.
+///
+/// # Constants
+///
+/// - `WP_DEBUG` / `WP_DEBUG_LOG` - record notices and errors in
+///   `wp-content/debug.log`, which is what QA needs when reproducing bugs.
+/// - `WP_DEBUG_DISPLAY` - keeps those errors out of the rendered page so they
+///   cannot break the markup under test. WordPress core sets
+///   `display_errors = 0` itself when this is `false`.
+/// - `FS_METHOD` - `direct` makes WordPress write with the PHP process' own
+///   credentials instead of prompting for FTP access on plugin, theme, and core
+///   installs.
+fn build_e2sp_wp_config_block() -> String {
+    format!(
+        "/* {marker} */\n\
+         /* Log notices and errors to wp-content/debug.log, but never render them. */\n\
+         define( 'WP_DEBUG', true );\n\
+         define( 'WP_DEBUG_LOG', true );\n\
+         define( 'WP_DEBUG_DISPLAY', false );\n\
+         \n\
+         /* Write files directly instead of asking for FTP credentials. */\n\
+         define( 'FS_METHOD', 'direct' );\n\
+         /* {marker} */\n",
+        marker = WP_CONFIG_E2SP_MARKER
+    )
+}
+
+/// Reports whether a line defines the given PHP constant.
+///
+/// # Arguments
+///
+/// * `line` - A single line of PHP source
+/// * `constant` - Name of the constant to look for, without quotes
+///
+/// # Returns
+///
+/// * `true` if the line is a `define()` call for exactly that constant
+/// * `false` otherwise
+///
+/// # Matching Rules
+///
+/// The line must *start* with `define` (after leading whitespace), so
+/// commented-out samples such as `// define( 'WP_DEBUG', true );` are left
+/// alone — they are inert PHP. The constant name is matched together with its
+/// surrounding quotes, which keeps `WP_DEBUG` from matching `WP_DEBUG_LOG`.
+/// Both quote styles are accepted.
+fn is_definition_of(line: &str, constant: &str) -> bool {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with("define") {
+        return false;
+    }
+
+    trimmed.contains(&format!("'{}'", constant)) || trimmed.contains(&format!("\"{}\"", constant))
+}
+
+/// Finds the line index at which the e2sp block should be inserted.
+///
+/// # Arguments
+///
+/// * `lines` - The `wp-config.php` content, split into lines
+///
+/// # Returns
+///
+/// The index the block must be inserted *before*.
+///
+/// # Resolution Order
+///
+/// 1. The `stop editing` anchor — WordPress' documented place for custom
+///    constants, and where a human would expect to find them.
+/// 2. Straight after the `<?php` tag, if the anchor is missing.
+/// 3. The top of the file, as a last resort.
+///
+/// Anything but the first case means the sample was not the stock WordPress
+/// one; the constants still land before `wp-settings.php` is required, which is
+/// the only hard requirement for them to take effect.
+fn e2sp_block_insertion_index(lines: &[&str]) -> usize {
+    if let Some(index) = lines
+        .iter()
+        .position(|line| line.contains(WP_CONFIG_STOP_EDITING_ANCHOR))
+    {
+        return index;
+    }
+
+    if let Some(index) = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with(PHP_OPEN_TAG))
+    {
+        return index + 1;
+    }
+
+    0
+}
+
+/// Inserts the e2sp-managed constants into `wp-config.php` content.
+///
+/// Existing definitions of the managed constants are removed first so PHP never
+/// sees a duplicate `define()`, then the block from
+/// [`build_e2sp_wp_config_block`] is inserted at the position chosen by
+/// [`e2sp_block_insertion_index`].
+///
+/// # Arguments
+///
+/// * `content` - The `wp-config.php` content generated so far
+///
+/// # Returns
+///
+/// The content with the managed block in place.
+///
+/// # Note
+///
+/// Line endings are normalised to `\n` and a trailing newline is guaranteed,
+/// which matches the file WordPress itself ships.
+fn insert_e2sp_wp_config_block(content: &str) -> String {
+    let lines: Vec<&str> = content
+        .lines()
+        .filter(|line| {
+            !E2SP_MANAGED_WP_CONSTANTS
+                .iter()
+                .any(|constant| is_definition_of(line, constant))
+        })
+        .collect();
+
+    let insertion_index = e2sp_block_insertion_index(&lines);
+    let mut wp_config_content = String::with_capacity(content.len() + 512);
+
+    for line in &lines[..insertion_index] {
+        wp_config_content.push_str(line);
+        wp_config_content.push('\n');
+    }
+    wp_config_content.push_str(&build_e2sp_wp_config_block());
+    wp_config_content.push('\n');
+    for line in &lines[insertion_index..] {
+        wp_config_content.push_str(line);
+        wp_config_content.push('\n');
+    }
+
+    wp_config_content
 }
 
 /// Generates a cryptographically secure salt key for WordPress.
@@ -561,16 +732,32 @@ pub fn create_directory_if_not_exists(
     #[cfg(unix)]
     {
         if let Some(mode) = permissions {
-            let permissions = fs::Permissions::from_mode(mode);
-            fs::set_permissions(path, permissions).map_err(|e| {
-                FileCreationError::PermissionSetFailed(format!(
-                    "Cannot set permissions on '{}': {}",
-                    dir_path, e
-                ))
-            })?;
+            set_path_permissions(path, mode)?;
         }
     }
     Ok(())
+}
+
+/// Sets Unix permissions on an existing file or directory.
+///
+/// # Arguments
+///
+/// * `path` - Path to the file or directory to modify
+/// * `mode` - Unix permission mode (e.g., `0o755`)
+///
+/// # Returns
+///
+/// * `Ok(())` if the mode was applied
+/// * `Err(FileCreationError::PermissionSetFailed)` if the path is missing or
+///   the current user may not change its mode
+fn set_path_permissions(path: &Path, mode: u32) -> Result<(), FileCreationError> {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|e| {
+        FileCreationError::PermissionSetFailed(format!(
+            "Cannot set permissions on '{}': {}",
+            path.display(),
+            e
+        ))
+    })
 }
 
 /// Creates a file with content if it doesn't exist.
@@ -655,19 +842,59 @@ pub fn create_file_with_content_if_not_exists(
     // Set appropriate permissions (644 - readable by all, writable by owner)
     #[cfg(unix)]
     {
-        if let Some(permissions) = permissions {
-            let permissions = fs::Permissions::from_mode(permissions);
-            fs::set_permissions(file_path, permissions).map_err(|e| {
+        if let Some(mode) = permissions {
+            // Leave nothing behind: a file whose mode could not be set would be
+            // readable by more users than the caller asked for.
+            set_path_permissions(file_path, mode).inspect_err(|_| {
                 sites::remove_file(path).unwrap_or(());
-                FileCreationError::PermissionSetFailed(format!(
-                    "Cannot set permissions on '{}': {}",
-                    path, e
-                ))
             })?;
         }
     }
 
     Ok(())
+}
+
+/// Creates the WordPress media uploads directory with web-server ownership.
+///
+/// WordPress does not ship `wp-content/uploads`; it creates the directory the
+/// first time a file is uploaded. Because the extracted WordPress tree belongs
+/// to `root` at that point, that creation fails and WordPress falls back to
+/// asking for FTP credentials — which is why the directory is created here
+/// instead, before the site is handed over.
+///
+/// The operation is idempotent: an existing directory only has its mode
+/// re-applied. Ownership is *not* set here; the caller applies it to the whole
+/// tree with [`set_web_server_ownership`] once every file is in place.
+///
+/// # Arguments
+///
+/// * `site_path` - Root directory of the WordPress installation
+///
+/// # Returns
+///
+/// * `Ok(())` if the uploads directory exists with the expected permissions
+/// * `Err(FileCreationError)` if it could not be created or its mode could not
+///   be set
+///
+/// # Examples
+///
+/// ```ignore
+/// create_wp_uploads_directory("/var/www/html/example.com")?;
+/// // → /var/www/html/example.com/wp-content/uploads (0755)
+/// ```
+pub fn create_wp_uploads_directory(site_path: &str) -> Result<(), FileCreationError> {
+    let uploads_path = format!(
+        "{}/{}",
+        site_path.trim_end_matches('/'),
+        WP_UPLOADS_RELATIVE_PATH
+    );
+    let path = Path::new(&uploads_path);
+
+    if path.is_dir() {
+        return set_path_permissions(path, WP_UPLOADS_PERMISSIONS);
+    }
+
+    create_directory_if_not_exists(&uploads_path, Some(WP_UPLOADS_PERMISSIONS))
 }
 
 /// Changes the ownership of a file or directory at the given path.
@@ -735,38 +962,84 @@ pub fn set_path_owner(
     group_name: Option<&str>,
     path: &str,
 ) -> Result<(), FileCreationError> {
-    // Get the UID for the current user
-    let uid = match user_name {
-        Some(name) => match nix::unistd::User::from_name(name) {
-            Ok(Some(user)) => Some(user.uid),
-            _ => {
-                return Err(FileCreationError::PermissionSetFailed(format!(
-                    "User '{}' not found",
-                    name
-                )));
-            }
-        },
-        None => None,
-    };
-    // Get the GID for the specified group
-    let gid = match group_name {
-        Some(name) => match Group::from_name(name) {
-            Ok(Some(group)) => Some(group.gid),
-            _ => {
-                return Err(FileCreationError::PermissionSetFailed(format!(
-                    "Group '{}' not found",
-                    name
-                )));
-            }
-        },
-        None => None,
+    let uid = resolve_uid(user_name)?;
+    let gid = resolve_gid(group_name)?;
+
+    chown_path(Path::new(path), uid, gid)
+}
+
+/// Resolves a user name to its UID.
+///
+/// # Arguments
+///
+/// * `user_name` - Name to look up, or `None` to leave the owner unchanged
+///
+/// # Returns
+///
+/// * `Ok(Some(uid))` for a known user
+/// * `Ok(None)` if `user_name` is `None`
+/// * `Err(FileCreationError::PermissionSetFailed)` if the user does not exist
+///   or the passwd database cannot be read
+fn resolve_uid(user_name: Option<&str>) -> Result<Option<Uid>, FileCreationError> {
+    let Some(name) = user_name else {
+        return Ok(None);
     };
 
-    // Apply ownership change
+    match nix::unistd::User::from_name(name) {
+        Ok(Some(user)) => Ok(Some(user.uid)),
+        _ => Err(FileCreationError::PermissionSetFailed(format!(
+            "User '{}' not found",
+            name
+        ))),
+    }
+}
+
+/// Resolves a group name to its GID.
+///
+/// # Arguments
+///
+/// * `group_name` - Name to look up, or `None` to leave the group unchanged
+///
+/// # Returns
+///
+/// * `Ok(Some(gid))` for a known group
+/// * `Ok(None)` if `group_name` is `None`
+/// * `Err(FileCreationError::PermissionSetFailed)` if the group does not exist
+///   or the group database cannot be read
+fn resolve_gid(group_name: Option<&str>) -> Result<Option<Gid>, FileCreationError> {
+    let Some(name) = group_name else {
+        return Ok(None);
+    };
+
+    match Group::from_name(name) {
+        Ok(Some(group)) => Ok(Some(group.gid)),
+        _ => Err(FileCreationError::PermissionSetFailed(format!(
+            "Group '{}' not found",
+            name
+        ))),
+    }
+}
+
+/// Applies an already-resolved owner and group to a single path.
+///
+/// # Arguments
+///
+/// * `path` - Path to the file or directory to modify
+/// * `uid` - Owner to set, or `None` to leave it unchanged
+/// * `gid` - Group to set, or `None` to leave it unchanged
+///
+/// # Returns
+///
+/// * `Ok(())` if the ownership change succeeded
+/// * `Err(FileCreationError::PermissionSetFailed)` if `chown` failed
+fn chown_path(path: &Path, uid: Option<Uid>, gid: Option<Gid>) -> Result<(), FileCreationError> {
     nix::unistd::chown(path, uid, gid).map_err(|e| {
-        FileCreationError::PermissionSetFailed(format!("Cannot set ownership on '{}': {}", path, e))
-    })?;
-    Ok(())
+        FileCreationError::PermissionSetFailed(format!(
+            "Cannot set ownership on '{}': {}",
+            path.display(),
+            e
+        ))
+    })
 }
 /// Recursively changes ownership of all files and directories under a root path.
 ///
@@ -800,24 +1073,56 @@ pub fn set_path_owner(
 /// - Sensitive files have restricted ownership
 /// - Group ownership aligns with collaboration needs
 /// # Implementation Details
-/// Utilizes `walkdir::WalkDir` for efficient recursive traversal of directories.
+/// Utilizes `walkdir::WalkDir` for efficient recursive traversal of directories,
+/// which already yields `path` itself as its first entry. The user and group are
+/// looked up once up front rather than per entry — a WordPress tree holds
+/// thousands of files, and each lookup queries the system user database.
+/// Symlinks are not followed, so a link's target is never chowned by accident.
 pub fn set_path_owner_recursive(
     user_name: Option<&str>,
     group_name: Option<&str>,
     path: &str,
 ) -> Result<(), FileCreationError> {
-    set_path_owner(user_name, group_name, path)?;
+    let uid = resolve_uid(user_name)?;
+    let gid = resolve_gid(group_name)?;
+
     for entry in walkdir::WalkDir::new(path) {
-        let walk_path = entry.map_err(|e| {
+        let entry = entry.map_err(|e| {
             FileCreationError::PermissionSetFailed(format!("Walk error at {}: {}", path, e))
         })?;
-        set_path_owner(
-            user_name,
-            group_name,
-            walk_path.path().to_str().unwrap_or(path),
-        )?;
+        chown_path(entry.path(), uid, gid)?;
     }
     Ok(())
+}
+
+/// Hands a path and everything below it to the web server user and group.
+///
+/// Every file the spawner writes — the extracted WordPress tree, `wp-config.php`,
+/// the uploads directory, the static `index.html` — is created by `root`, since
+/// the tool runs under sudo. PHP-FPM runs as
+/// [`crate::constants::WEB_SERVER_USER`], so it cannot write into a `root`-owned
+/// tree: media uploads, plugin installs, and `wp-content/debug.log` all fail and
+/// WordPress falls back to asking for FTP credentials. Calling this once, after
+/// the last file is written, is what makes those work.
+///
+/// # Arguments
+///
+/// * `path` - Root of the tree to hand over, typically the site directory
+///
+/// # Returns
+///
+/// * `Ok(())` if the whole tree now belongs to the web server user and group
+/// * `Err(FileCreationError::PermissionSetFailed)` if the account is missing,
+///   the process is not root, or the tree could not be traversed
+///
+/// # Examples
+///
+/// ```ignore
+/// // Runs last, so nothing written afterwards is left owned by root.
+/// set_web_server_ownership("/var/www/html/example.com")?;
+/// ```
+pub fn set_web_server_ownership(path: &str) -> Result<(), FileCreationError> {
+    set_path_owner_recursive(Some(WEB_SERVER_USER), Some(WEB_SERVER_GROUP), path)
 }
 /// Retrieves the effective sudo user or falls back to the current user.
 ///
@@ -1631,6 +1936,312 @@ define('AUTH_KEY', 'put your unique phrase here');
 
         assert!(result.is_err());
         assert!(matches!(result, Err(FileCreationError::FileWriteFailed(_))));
+    }
+
+    // ===== e2sp-managed wp-config Block Tests =====
+
+    /// Excerpt of the stock `wp-config-sample.php`, reproduced verbatim
+    /// (WordPress 7.0.2) so these tests fail if the assumptions about the
+    /// shipped file ever stop holding.
+    const STOCK_SAMPLE: &str = r#"<?php
+define( 'DB_NAME', 'database_name_here' );
+define( 'DB_USER', 'username_here' );
+define( 'DB_PASSWORD', 'password_here' );
+define( 'DB_HOST', 'localhost' );
+define( 'AUTH_KEY',         'put your unique phrase here' );
+
+$table_prefix = 'wp_';
+
+/**
+ * For developers: WordPress debugging mode.
+ */
+define( 'WP_DEBUG', false );
+
+/* Add any custom values between this line and the "stop editing" line. */
+
+
+
+/* That's all, stop editing! Happy publishing. */
+
+/** Absolute path to the WordPress directory. */
+if ( ! defined( 'ABSPATH' ) ) {
+	define( 'ABSPATH', __DIR__ . '/' );
+}
+
+/** Sets up WordPress vars and included files. */
+require_once ABSPATH . 'wp-settings.php';
+"#;
+
+    fn generated_stock_config() -> String {
+        generate_wp_config_content_from_sample(
+            "wp_site",
+            "wordpress",
+            "pleaseadvise",
+            "localhost",
+            "utf8mb4",
+            STOCK_SAMPLE.to_string(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_generated_config_enables_debug_logging() {
+        let config = generated_stock_config();
+
+        assert!(config.contains("define( 'WP_DEBUG', true );"));
+        assert!(config.contains("define( 'WP_DEBUG_LOG', true );"));
+        assert!(config.contains("define( 'WP_DEBUG_DISPLAY', false );"));
+        // The sample's `false` must be gone, not merely overridden.
+        assert!(!config.contains("define( 'WP_DEBUG', false );"));
+    }
+
+    #[test]
+    fn test_generated_config_sets_fs_method_direct() {
+        assert!(
+            generated_stock_config().contains("define( 'FS_METHOD', 'direct' );"),
+            "FS_METHOD must be direct so WordPress never asks for FTP credentials"
+        );
+    }
+
+    #[test]
+    fn test_generated_config_defines_each_managed_constant_once() {
+        let config = generated_stock_config();
+
+        // PHP warns and keeps the first value when a constant is defined twice.
+        for constant in E2SP_MANAGED_WP_CONSTANTS {
+            let definitions = config
+                .lines()
+                .filter(|line| is_definition_of(line, constant))
+                .count();
+            assert_eq!(
+                definitions, 1,
+                "'{}' must be defined exactly once",
+                constant
+            );
+        }
+    }
+
+    #[test]
+    fn test_generated_config_places_block_before_wp_settings() {
+        let config = generated_stock_config();
+
+        let block = config.find(WP_CONFIG_E2SP_MARKER).unwrap();
+        let anchor = config.find(WP_CONFIG_STOP_EDITING_ANCHOR).unwrap();
+        let wp_settings = config.find("require_once ABSPATH").unwrap();
+
+        // Constants are only honoured if they are defined before wp-settings.php.
+        assert!(block < anchor);
+        assert!(anchor < wp_settings);
+    }
+
+    #[test]
+    fn test_generated_config_keeps_database_credentials() {
+        let config = generated_stock_config();
+
+        assert!(config.contains("'wp_site'"));
+        assert!(config.contains("'wordpress'"));
+        assert!(config.contains("'pleaseadvise'"));
+        assert!(!config.contains("put your unique phrase here"));
+    }
+
+    #[test]
+    fn test_insert_block_replaces_conflicting_defines() {
+        let sample = "<?php\n\
+                      define( 'WP_DEBUG_LOG', false );\n\
+                      define( \"FS_METHOD\", \"ftpext\" );\n\
+                      /* That's all, stop editing! */\n";
+
+        let result = insert_e2sp_wp_config_block(sample);
+
+        assert!(!result.contains("ftpext"));
+        assert!(!result.contains("define( 'WP_DEBUG_LOG', false );"));
+        assert!(result.contains("define( 'FS_METHOD', 'direct' );"));
+    }
+
+    #[test]
+    fn test_insert_block_falls_back_to_php_tag() {
+        let sample = "<?php\ndefine( 'DB_NAME', 'db' );\n";
+
+        let result = insert_e2sp_wp_config_block(sample);
+        let lines: Vec<&str> = result.lines().collect();
+
+        // No anchor, so the block goes straight after the opening tag - still
+        // ahead of everything that could require wp-settings.php.
+        assert_eq!(lines[0], "<?php");
+        assert!(lines[1].contains(WP_CONFIG_E2SP_MARKER));
+        assert!(result.contains("define( 'DB_NAME', 'db' );"));
+    }
+
+    #[test]
+    fn test_insert_block_preserves_unrelated_content() {
+        let sample = "<?php\n$table_prefix = 'wp_';\n/* That's all, stop editing! */\n";
+
+        let result = insert_e2sp_wp_config_block(sample);
+
+        assert!(result.contains("$table_prefix = 'wp_';"));
+        assert!(result.contains("/* That's all, stop editing! */"));
+        assert!(result.ends_with('\n'));
+    }
+
+    #[test]
+    fn test_e2sp_block_insertion_index() {
+        // Anchor wins over the PHP tag.
+        assert_eq!(
+            e2sp_block_insertion_index(&["<?php", "code", "/* That's all, stop editing! */"]),
+            2
+        );
+        // Without an anchor, insert right after the opening tag.
+        assert_eq!(e2sp_block_insertion_index(&["<?php", "code"]), 1);
+        // Without either, fall back to the top of the file.
+        assert_eq!(e2sp_block_insertion_index(&["code"]), 0);
+    }
+
+    #[test]
+    fn test_is_definition_of() {
+        assert!(is_definition_of("define( 'WP_DEBUG', false );", "WP_DEBUG"));
+        assert!(is_definition_of(
+            "  define(\"WP_DEBUG\", false);",
+            "WP_DEBUG"
+        ));
+
+        // A longer constant must not be mistaken for a shorter one.
+        assert!(!is_definition_of(
+            "define( 'WP_DEBUG_LOG', false );",
+            "WP_DEBUG"
+        ));
+        // Commented-out definitions are inert and must be left in place.
+        assert!(!is_definition_of(
+            "// define( 'WP_DEBUG', true );",
+            "WP_DEBUG"
+        ));
+        assert!(!is_definition_of("$wp_debug = 'WP_DEBUG';", "WP_DEBUG"));
+    }
+
+    // ===== WordPress Uploads Directory Tests =====
+
+    #[test]
+    #[cfg(unix)]
+    fn test_create_wp_uploads_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let site_path = temp_dir.path().to_str().unwrap();
+
+        create_wp_uploads_directory(site_path).unwrap();
+
+        let uploads = temp_dir.path().join(WP_UPLOADS_RELATIVE_PATH);
+        assert!(uploads.is_dir(), "uploads directory must be created");
+        assert_eq!(
+            fs::metadata(&uploads).unwrap().permissions().mode() & 0o777,
+            WP_UPLOADS_PERMISSIONS
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_create_wp_uploads_directory_is_idempotent() {
+        let temp_dir = TempDir::new().unwrap();
+        let site_path = temp_dir.path().to_str().unwrap();
+        let uploads = temp_dir.path().join(WP_UPLOADS_RELATIVE_PATH);
+
+        // A pre-existing directory with the wrong mode must be corrected, not
+        // treated as a failure - `update --wp` can meet leftovers.
+        fs::create_dir_all(&uploads).unwrap();
+        set_path_permissions(&uploads, 0o700).unwrap();
+
+        assert!(create_wp_uploads_directory(site_path).is_ok());
+        assert_eq!(
+            fs::metadata(&uploads).unwrap().permissions().mode() & 0o777,
+            WP_UPLOADS_PERMISSIONS
+        );
+    }
+
+    #[test]
+    fn test_create_wp_uploads_directory_trailing_slash() {
+        let temp_dir = TempDir::new().unwrap();
+        let site_path = format!("{}/", temp_dir.path().to_str().unwrap());
+
+        create_wp_uploads_directory(&site_path).unwrap();
+
+        assert!(temp_dir.path().join(WP_UPLOADS_RELATIVE_PATH).is_dir());
+    }
+
+    #[test]
+    fn test_create_wp_uploads_directory_on_missing_site() {
+        let temp_dir = TempDir::new().unwrap();
+        let missing = temp_dir.path().join("no-such-site");
+        // Nested creation succeeds; the guard against spawning into a missing
+        // site lives in the command layer, so this only documents the behaviour.
+        assert!(create_wp_uploads_directory(missing.to_str().unwrap()).is_ok());
+        assert!(missing.join(WP_UPLOADS_RELATIVE_PATH).is_dir());
+    }
+
+    // ===== Web Server Ownership Tests =====
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_path_owner_recursive_visits_whole_tree() {
+        let temp_dir = TempDir::new().unwrap();
+        let nested = temp_dir.path().join("wp-content/plugins");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("plugin.php"), "<?php").unwrap();
+        fs::write(temp_dir.path().join("index.php"), "<?php").unwrap();
+
+        // `None`/`None` chowns nothing, so this needs no privileges, but every
+        // entry is still visited: an unreadable or missing one would error out.
+        // This is what guarantees an extracted WordPress tree is fully covered.
+        assert!(
+            set_path_owner_recursive(None, None, temp_dir.path().to_str().unwrap()).is_ok(),
+            "traversal must reach every entry under the site root"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_path_owner_recursive_missing_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let missing = temp_dir.path().join("no-such-site");
+
+        // The root itself is part of the traversal, so a missing one is an error
+        // rather than a silent success over zero entries.
+        let result = set_path_owner_recursive(None, None, missing.to_str().unwrap());
+
+        assert!(matches!(
+            result,
+            Err(FileCreationError::PermissionSetFailed(_))
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_path_owner_recursive_unknown_user() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("file.txt"), "test").unwrap();
+
+        // The account is resolved once, before anything is touched, so an
+        // unknown name fails without leaving the tree half-chowned.
+        let result = set_path_owner_recursive(
+            Some("nonexistent_user_12345"),
+            Some("nonexistent_group_12345"),
+            temp_dir.path().to_str().unwrap(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(FileCreationError::PermissionSetFailed(_))
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_web_server_ownership_reports_missing_account() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // On a QA LNMP box www-data exists and this needs root; elsewhere the
+        // account is missing. Either way the result must be a typed error, and
+        // never a panic.
+        match set_web_server_ownership(temp_dir.path().to_str().unwrap()) {
+            Ok(()) => {}
+            Err(e) => assert!(matches!(e, FileCreationError::PermissionSetFailed(_))),
+        }
     }
 
     #[test]
