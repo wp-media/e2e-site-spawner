@@ -19,11 +19,85 @@
 //! - Port 80 must be accessible for domain validation
 //! - Proper permissions for certificate directories
 
+use crate::constants::ACME_CONFIG_HOME;
 use crate::nginx;
 use crate::utils::sites::get_sudo_user;
 use colored::*;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// File name acme.sh gives to the issued full chain inside a certificate
+/// directory (`CERT_FULLCHAIN_PATH` in acme.sh).
+const ACME_FULLCHAIN_FILE: &str = "fullchain.cer";
+
+/// Suffix acme.sh appends to the certificate directory of ECC certificates
+/// (`ECC_SUFFIX` in acme.sh).
+///
+/// ECC is acme.sh's default key type, so certificates issued by this tool
+/// normally live in `<domain>_ecc`.
+const ACME_ECC_DIR_SUFFIX: &str = "_ecc";
+
+/// Minimum validity a stored certificate must have left to be installed as-is.
+///
+/// Installing a certificate that is already expired — or expires within hours —
+/// leaves the site serving HTTPS that every browser rejects, so such a
+/// certificate is re-issued instead of reused.
+const MIN_CERTIFICATE_VALIDITY_SECS: u64 = 24 * 60 * 60;
+
+/// What acme.sh currently holds for a given certificate name (domain).
+///
+/// Classifying this up front is what makes a retry after a failed issuance work:
+///
+/// - `acme.sh --issue` aborts with `Domain key exists, do you want to overwrite
+///   it?` when it finds the domain key left behind by an interrupted attempt,
+///   without ever contacting Let's Encrypt.
+/// - `acme.sh --install-cert` only checks that the certificate *directory*
+///   exists, then copies `fullchain.cer` unconditionally — failing with a bare
+///   `cat: …/fullchain.cer: No such file or directory` when no certificate was
+///   ever issued.
+///
+/// Deciding from the files acme.sh actually wrote — instead of pattern-matching
+/// its log output — lets the caller pick the right invocation and refuse to
+/// install a certificate that does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcmeCertificateState {
+    /// acme.sh has no certificate directory for this name: nothing was attempted yet.
+    Absent,
+    /// A certificate directory exists but holds no usable certificate, because a
+    /// previous issuance failed or was interrupted before the certificate was
+    /// downloaded.
+    Incomplete,
+    /// A certificate exists but is expired, or expires within
+    /// [`MIN_CERTIFICATE_VALIDITY_SECS`], so it must not be installed as-is.
+    Expired,
+    /// A usable certificate and its private key are present, ready to install.
+    Ready,
+}
+
+impl AcmeCertificateState {
+    /// Explains why issuance has to be forced in this state, for both the
+    /// operator-facing notice and the `--force` decision.
+    ///
+    /// acme.sh refuses to overwrite an existing domain key, and skips renewal
+    /// before the renewal window, unless `--force` is passed — so any leftover
+    /// state has to be overwritten explicitly.
+    ///
+    /// # Returns
+    ///
+    /// * `Some(&str)` - Issuance must be forced, with the reason to display
+    /// * `None` - Nothing to overwrite ([`AcmeCertificateState::Absent`]) or
+    ///   nothing to do ([`AcmeCertificateState::Ready`])
+    fn forced_issuance_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Incomplete => {
+                Some("Incomplete certificate from a previous attempt found, re-issuing")
+            }
+            Self::Expired => Some("Stored certificate has expired, re-issuing"),
+            Self::Absent | Self::Ready => None,
+        }
+    }
+}
 
 /// Generates SSL certificates for a site using acme.sh.
 ///
@@ -43,9 +117,19 @@ use std::process::Command;
 /// # Process Flow
 ///
 /// 1. **Validation**: Ensures SSL root directory is configured
-/// 2. **Certificate Issuance**: Requests certificate from Let's Encrypt using HTTP-01 challenge
-/// 3. **Certificate Installation**: Copies certificates to nginx directories
-/// 4. **Nginx Reload**: Triggers nginx reload to apply new certificates
+/// 2. **Certificate Issuance**: `ensure_certificate_issued` requests the
+///    certificate from Let's Encrypt using the HTTP-01 challenge, reusing or
+///    replacing whatever acme.sh already holds for the domain
+/// 3. **Certificate Installation**: `install_certificate` copies the key and full
+///    chain to the nginx SSL directory and registers auto-renewal
+/// 4. **Nginx Reload**: Triggered by acme.sh's reload command once the files are in place
+///
+/// # Retrying a Failed Attempt
+///
+/// A failed issuance (an unpointed domain being the usual cause) leaves a domain
+/// key and renewal configuration behind in acme.sh. Re-running this function is
+/// safe: leftover state is detected and overwritten, and a certificate is only
+/// installed once acme.sh has actually produced one.
 ///
 /// # Requirements
 ///
@@ -61,7 +145,7 @@ use std::process::Command;
 /// - Domain verification failures with troubleshooting steps
 /// - Missing acme.sh installation instructions
 /// - Permission issues with directories
-/// - Existing certificate detection
+/// - Issuance that completed without producing a certificate
 ///
 /// # Auto-Renewal
 ///
@@ -104,7 +188,6 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
     })?;
 
     let site_name = &nginx_config.site_name;
-    let webroot = &nginx_config.root;
 
     println!(
         "\n{} Generating SSL certificate for '{}'",
@@ -113,79 +196,96 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
     );
     println!("{}", "─".repeat(60).bright_black());
 
-    // Step 1: Issue the SSL certificate
+    ensure_certificate_issued(site_name, &nginx_config.root)?;
+    install_certificate(site_name, ssl_root)?;
+    print_generation_summary(site_name, ssl_root);
+
+    Ok(())
+}
+
+/// Makes sure acme.sh holds a usable certificate for `site_name`, issuing one
+/// when needed.
+///
+/// This is step 1 of [`generate_ssl`]. It inspects what acme.sh has on disk and
+/// issues accordingly, then verifies the outcome so the install step can never
+/// run against a certificate that does not exist:
+///
+/// | State | Action |
+/// |-------|--------|
+/// | [`AcmeCertificateState::Ready`] | Issuance is skipped, the existing certificate is reused |
+/// | [`AcmeCertificateState::Absent`] | `acme.sh --issue` |
+/// | [`AcmeCertificateState::Incomplete`] / [`AcmeCertificateState::Expired`] | `acme.sh --issue --force`, to overwrite the leftover state |
+///
+/// # Arguments
+///
+/// * `site_name` - Domain the certificate is issued for
+/// * `webroot` - Document root used for the HTTP-01 challenge
+///
+/// # Returns
+///
+/// * `Ok(())` - acme.sh now holds a usable certificate for the domain
+/// * `Err(String)` - acme.sh could not be executed, or finished without
+///   producing a certificate (typically a failed domain validation)
+fn ensure_certificate_issued(site_name: &str, webroot: &str) -> Result<(), String> {
     println!(
         "  {} Requesting certificate from Let's Encrypt...",
         "1.".bright_cyan()
     );
 
-    let issue_output = Command::new("acme.sh")
-        .args([
-            "--issue",
-            "-d", site_name,
-            "--webroot", webroot,
-            "--server", "letsencrypt"
-        ])
-        .output()
-        .map_err(|e| {
-            format!(
-                "Failed to execute acme.sh: {}. \
-                Please ensure acme.sh is correctly installed: http://github.com/acmesh-official/acme.sh",
-                e
-            )
-        })?;
-
-    if !issue_output.status.success() {
-        let stderr = String::from_utf8_lossy(&issue_output.stderr);
-        let stdout = String::from_utf8_lossy(&issue_output.stdout);
-        let full_output = format!("{}{}", stdout, stderr);
-        // Check for common errors
-        if full_output.contains("Verify error") {
-            return Err(format!(
-                "Domain verification failed for '{}'.\n\
-                Please ensure:\n\
-                • The domain is pointing to this server's IP\n\
-                • DNS has propagated (can take up to 48 hours)\n\
-                • Port 80 is accessible from the internet\n\
-                • The webroot path {} exists and is accessible\n\n\
-                Error output:\n{}",
-                site_name, webroot, stderr
-            ));
-        } else if full_output.contains("already exists")
-            || full_output.contains("Domain key exists, do you want to overwrite it?")
-        {
-            println!(
-                "  {} Certificate already exists, skipping issuance",
-                "ℹ️".bright_yellow()
-            );
-        } else if full_output.contains("Domains not changed") {
-            println!(
-                "  {} Domain verification skipped (no changes detected)",
-                "ℹ️".bright_yellow()
-            );
-        } else {
-            return Err(format!(
-                "Failed to issue SSL certificate:\n{}{}",
-                stdout, stderr
-            ));
-        }
-    } else {
-        println!("  {} Certificate issued successfully", "✓".bright_green());
+    let state = classify_acme_certificate(site_name)?;
+    if state == AcmeCertificateState::Ready {
+        println!(
+            "  {} Valid certificate already issued by acme.sh, skipping issuance",
+            "ℹ️".bright_yellow()
+        );
+        return Ok(());
     }
 
-    // Step 2: Install the certificate
+    let force_reason = state.forced_issuance_reason();
+    if let Some(reason) = force_reason {
+        println!("  {} {}", "ℹ️".bright_yellow(), reason);
+    }
+
+    let acme_output = run_acme_issue(site_name, webroot, force_reason.is_some())?;
+
+    // acme.sh exits non-zero for benign reasons too, so its status alone cannot
+    // tell issuance apart from a no-op. Only the certificate it wrote can.
+    if classify_acme_certificate(site_name)? != AcmeCertificateState::Ready {
+        return Err(describe_issuance_failure(site_name, webroot, &acme_output));
+    }
+
+    println!("  {} Certificate issued successfully", "✓".bright_green());
+    Ok(())
+}
+
+/// Installs the issued certificate into the site's nginx SSL directory.
+///
+/// This is step 2 of [`generate_ssl`]. Besides copying the key and full chain,
+/// `acme.sh --install-cert` registers the paths and the reload command in the
+/// certificate's renewal configuration, which is what keeps auto-renewal working.
+///
+/// # Arguments
+///
+/// * `site_name` - Domain whose certificate is installed
+/// * `ssl_root` - Nginx SSL directory for the site, e.g. `/etc/nginx/ssl/example.com`
+///
+/// # Returns
+///
+/// * `Ok(())` - Certificate installed and nginx reloaded by acme.sh
+/// * `Err(String)` - acme.sh could not be executed, or the installation failed
+fn install_certificate(site_name: &str, ssl_root: &str) -> Result<(), String> {
     println!(
         "  {} Installing certificate to nginx directories...",
         "2.".bright_cyan()
     );
 
-    let privkey_path = format!("{}/privkey.pem", ssl_root);
-    let fullchain_path = format!("{}/fullchain.pem", ssl_root);
-    let current_user = get_sudo_user();
+    let (privkey_path, fullchain_path) = nginx_certificate_paths(ssl_root);
     let reloadcmd = format!(
         "sudo systemctl reload nginx && chown -R {}:root {}",
-        current_user, ssl_root
+        get_sudo_user(),
+        ssl_root
     );
+
     let install_output = Command::new("acme.sh")
         .args([
             "--install-cert",
@@ -204,21 +304,30 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
         .map_err(|e| format!("Failed to execute acme.sh install command: {}", e))?;
 
     if !install_output.status.success() {
-        let stderr = String::from_utf8_lossy(&install_output.stderr);
-        let stdout = String::from_utf8_lossy(&install_output.stdout);
-
         return Err(format!(
             "Failed to install SSL certificate:\n\
             • Check if the SSL directory {} exists\n\
             • Ensure proper permissions to write to {}\n\
             • Verify nginx service is running\n\n\
             Error output:\n{}{}",
-            ssl_root, ssl_root, stdout, stderr
+            ssl_root,
+            ssl_root,
+            String::from_utf8_lossy(&install_output.stdout),
+            String::from_utf8_lossy(&install_output.stderr)
         ));
     }
 
-    // println!("  {} Certificate installed successfully", "✓".bright_green());
-    // println!("  {} Nginx reloaded with new certificate", "✓".bright_green());
+    Ok(())
+}
+
+/// Prints the certificate summary shown after a successful generation.
+///
+/// # Arguments
+///
+/// * `site_name` - Domain the certificate was issued for
+/// * `ssl_root` - Nginx SSL directory holding the installed certificate
+fn print_generation_summary(site_name: &str, ssl_root: &str) {
+    let (privkey_path, fullchain_path) = nginx_certificate_paths(ssl_root);
 
     println!("{}", "─".repeat(60).bright_black());
     println!(
@@ -234,7 +343,293 @@ pub fn generate_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), Str
         "  • Auto-renewal: {}",
         "Enabled via acme.sh cron".bright_green()
     );
-    Ok(())
+}
+
+/// Returns the `(private key, full chain)` paths nginx reads for a site.
+///
+/// These are the destinations acme.sh installs to and the paths embedded in the
+/// generated HTTPS server block.
+///
+/// # Arguments
+///
+/// * `ssl_root` - Nginx SSL directory for the site
+///
+/// # Returns
+///
+/// A tuple of `({ssl_root}/privkey.pem, {ssl_root}/fullchain.pem)`.
+fn nginx_certificate_paths(ssl_root: &str) -> (String, String) {
+    (
+        format!("{}/privkey.pem", ssl_root),
+        format!("{}/fullchain.pem", ssl_root),
+    )
+}
+
+/// Runs `acme.sh --issue` for a domain and returns its combined output.
+///
+/// A non-zero exit status is deliberately **not** treated as an error here:
+/// acme.sh also exits non-zero when it simply declines to act, for instance when
+/// an existing certificate is not yet due for renewal. Whether a certificate now
+/// exists is decided by `classify_acme_certificate`, which inspects what acme.sh
+/// wrote rather than how it worded its log.
+///
+/// # Arguments
+///
+/// * `site_name` - Domain to issue the certificate for
+/// * `webroot` - Document root served over HTTP, used for the HTTP-01 challenge
+/// * `force` - Adds `--force`, required to overwrite the domain key and renewal
+///   state left behind by an earlier attempt
+///
+/// # Returns
+///
+/// * `Ok(String)` - acme.sh's stdout followed by its stderr
+/// * `Err(String)` - acme.sh could not be executed at all
+fn run_acme_issue(site_name: &str, webroot: &str, force: bool) -> Result<String, String> {
+    let mut args = vec![
+        "--issue",
+        "-d",
+        site_name,
+        "--webroot",
+        webroot,
+        "--server",
+        "letsencrypt",
+    ];
+
+    if force {
+        args.push("--force");
+    }
+
+    let output = Command::new("acme.sh")
+        .args(&args)
+        .output()
+        .map_err(acme_execution_error)?;
+
+    Ok(format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
+/// Builds the error reported when an issuance attempt produced no certificate.
+///
+/// A failed domain validation is by far the most common cause, so it gets the
+/// full checklist; anything else falls back to acme.sh's own output.
+///
+/// # Arguments
+///
+/// * `site_name` - Domain that failed to be issued
+/// * `webroot` - Document root used for the HTTP-01 challenge
+/// * `acme_output` - Combined output of the `acme.sh --issue` run
+///
+/// # Returns
+///
+/// The user-facing error message.
+fn describe_issuance_failure(site_name: &str, webroot: &str, acme_output: &str) -> String {
+    if acme_output.contains("Verify error") {
+        return format!(
+            "Domain verification failed for '{}'.\n\
+            Please ensure:\n\
+            • The domain is pointing to this server's IP\n\
+            • DNS has propagated (can take up to 48 hours)\n\
+            • Port 80 is accessible from the internet\n\
+            • The webroot path {} exists and is accessible\n\n\
+            Error output:\n{}",
+            site_name, webroot, acme_output
+        );
+    }
+
+    format!(
+        "Failed to issue SSL certificate for '{}': \
+        acme.sh finished without producing a certificate.\n\n\
+        Error output:\n{}",
+        site_name, acme_output
+    )
+}
+
+/// Determines what acme.sh currently holds for a domain.
+///
+/// # Arguments
+///
+/// * `site_name` - Domain (certificate name) to inspect
+///
+/// # Returns
+///
+/// * `Ok(AcmeCertificateState)` - The classified state
+/// * `Err(String)` - acme.sh could not be executed at all
+fn classify_acme_certificate(site_name: &str) -> Result<AcmeCertificateState, String> {
+    match resolve_acme_cert_dir(site_name)? {
+        Some(cert_dir) => Ok(classify_acme_cert_dir(&cert_dir, site_name)),
+        None => Ok(AcmeCertificateState::Absent),
+    }
+}
+
+/// Classifies the acme.sh state stored in a certificate directory.
+///
+/// Both the full chain and the domain key are required, because
+/// `acme.sh --install-cert` copies both and fails on whichever is missing.
+///
+/// # Arguments
+///
+/// * `cert_dir` - An existing acme.sh certificate directory
+/// * `site_name` - Domain the directory belongs to, used to build the key name
+///
+/// # Returns
+///
+/// [`AcmeCertificateState::Incomplete`], [`AcmeCertificateState::Expired`] or
+/// [`AcmeCertificateState::Ready`] — never
+/// [`AcmeCertificateState::Absent`], which is decided by the caller.
+fn classify_acme_cert_dir(cert_dir: &Path, site_name: &str) -> AcmeCertificateState {
+    let fullchain = cert_dir.join(ACME_FULLCHAIN_FILE);
+    let domain_key = cert_dir.join(format!("{}.key", site_name));
+
+    if !fullchain.is_file() || !domain_key.is_file() {
+        return AcmeCertificateState::Incomplete;
+    }
+
+    if is_certificate_expiring(&fullchain, MIN_CERTIFICATE_VALIDITY_SECS) {
+        return AcmeCertificateState::Expired;
+    }
+
+    AcmeCertificateState::Ready
+}
+
+/// Resolves the acme.sh certificate directory for a domain.
+///
+/// acme.sh itself is asked first (`acme.sh --info -d <domain>`), so a custom
+/// `CERT_HOME`/`LE_CONFIG_HOME` and the `_ecc` suffix are honoured exactly as
+/// `--install-cert` would resolve them. Releases older than 3.0.2 have no
+/// `--info` command; for those the lookup falls back to the fleet default layout
+/// under [`crate::constants::ACME_CONFIG_HOME`].
+///
+/// # Arguments
+///
+/// * `site_name` - Domain (certificate name) to look up
+///
+/// # Returns
+///
+/// * `Ok(Some(PathBuf))` - Existing certificate directory
+/// * `Ok(None)` - acme.sh holds no directory for this domain
+/// * `Err(String)` - acme.sh could not be executed at all
+fn resolve_acme_cert_dir(site_name: &str) -> Result<Option<PathBuf>, String> {
+    let info_output = Command::new("acme.sh")
+        .args(["--info", "-d", site_name])
+        .output()
+        .map_err(acme_execution_error)?;
+
+    let stdout = String::from_utf8_lossy(&info_output.stdout);
+
+    match parse_domain_conf_path(&stdout) {
+        Some(domain_conf) => Ok(domain_conf
+            .parent()
+            .filter(|dir| dir.is_dir())
+            .map(Path::to_path_buf)),
+        None => Ok(find_acme_cert_dir(Path::new(ACME_CONFIG_HOME), site_name)),
+    }
+}
+
+/// Extracts the `DOMAIN_CONF=` path from `acme.sh --info` output.
+///
+/// `acme.sh --info -d <domain>` prints the resolved `DOMAIN_CONF` path even when
+/// that file does not exist yet, which makes it a reliable way to learn where
+/// acme.sh keeps the domain's certificate material. It is not necessarily the
+/// first line: acme.sh may print informational notices — such as its
+/// ECC-certificate detection — to stdout beforehand, so every line is scanned.
+///
+/// # Arguments
+///
+/// * `info_output` - Stdout of `acme.sh --info -d <domain>`
+///
+/// # Returns
+///
+/// * `Some(PathBuf)` - The reported `<domain>.conf` path
+/// * `None` - No `DOMAIN_CONF=` line, e.g. on acme.sh releases without `--info`
+fn parse_domain_conf_path(info_output: &str) -> Option<PathBuf> {
+    info_output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("DOMAIN_CONF="))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Locates the acme.sh certificate directory for a domain under a config home.
+///
+/// Mirrors acme.sh's own `_initpath` preference: the plain `<domain>` directory
+/// wins when it exists, otherwise its ECC twin `<domain>_ecc` is used. Keeping
+/// that order matters because `acme.sh --install-cert` resolves the directory the
+/// same way, and this lookup has to predict what the install step will read.
+///
+/// # Arguments
+///
+/// * `config_home` - acme.sh configuration home, e.g. `/root/.acme.sh`
+/// * `site_name` - Domain (certificate name) to look up
+///
+/// # Returns
+///
+/// * `Some(PathBuf)` - An existing certificate directory
+/// * `None` - Neither the plain nor the ECC directory exists
+fn find_acme_cert_dir(config_home: &Path, site_name: &str) -> Option<PathBuf> {
+    let plain_dir = config_home.join(site_name);
+    if plain_dir.is_dir() {
+        return Some(plain_dir);
+    }
+
+    let ecc_dir = config_home.join(format!("{}{}", site_name, ACME_ECC_DIR_SUFFIX));
+    if ecc_dir.is_dir() {
+        return Some(ecc_dir);
+    }
+
+    None
+}
+
+/// Reports whether a certificate expires within the given look-ahead window.
+///
+/// Delegates to `openssl x509 -checkend`, which reads the leaf certificate of a
+/// full-chain file and exits non-zero when it is expired, about to expire, or
+/// unreadable.
+///
+/// # Arguments
+///
+/// * `cert_path` - Path to a PEM certificate or full chain
+/// * `within_secs` - Look-ahead window in seconds
+///
+/// # Returns
+///
+/// * `true` - The certificate expires within the window, or openssl could not
+///   parse it (an unusable certificate must not be installed either)
+/// * `false` - The certificate is valid for longer, or openssl is unavailable.
+///   Treating an undeterminable certificate as valid keeps the tool from forcing
+///   a needless re-issue; the install step still verifies what it copies.
+fn is_certificate_expiring(cert_path: &Path, within_secs: u64) -> bool {
+    Command::new("openssl")
+        .args([
+            "x509",
+            "-checkend",
+            &within_secs.to_string(),
+            "-noout",
+            "-in",
+        ])
+        .arg(cert_path)
+        .output()
+        .map(|output| !output.status.success())
+        .unwrap_or(false)
+}
+
+/// Builds the error reported when the acme.sh binary cannot be executed.
+///
+/// # Arguments
+///
+/// * `error` - The spawn error returned by [`std::process::Command::output`]
+///
+/// # Returns
+///
+/// The user-facing error message, including where to get acme.sh.
+fn acme_execution_error(error: io::Error) -> String {
+    format!(
+        "Failed to execute acme.sh: {}. \
+        Please ensure acme.sh is correctly installed: http://github.com/acmesh-official/acme.sh",
+        error
+    )
 }
 /// Removes a site from acme.sh management.
 ///
@@ -544,6 +939,331 @@ mod tests {
     use std::fs;
     use std::process::{Command, Stdio};
     use tempfile::TempDir;
+
+    // ===== acme.sh State Detection Tests =====
+
+    /// Writes a self-signed certificate valid for `days` days at `cert_path`.
+    ///
+    /// Returns `false` when openssl is unavailable, so the caller can skip
+    /// assertions that depend on real certificate parsing.
+    fn generate_self_signed_cert(cert_path: &Path, days: u32) -> bool {
+        if !command_exists("openssl") {
+            return false;
+        }
+
+        Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-subj",
+                "/CN=test.local",
+                "-days",
+                &days.to_string(),
+                "-keyout",
+            ])
+            .arg(cert_path.with_extension("tmpkey"))
+            .arg("-out")
+            .arg(cert_path)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Creates an acme.sh-style certificate directory holding the given files.
+    fn make_acme_cert_dir(config_home: &Path, dir_name: &str, files: &[&str]) -> PathBuf {
+        let cert_dir = config_home.join(dir_name);
+        fs::create_dir_all(&cert_dir).unwrap();
+
+        for file in files {
+            fs::write(cert_dir.join(file), "test-content").unwrap();
+        }
+
+        cert_dir
+    }
+
+    #[test]
+    fn test_parse_domain_conf_path_from_acme_info_output() {
+        let output = "DOMAIN_CONF=/root/.acme.sh/example.com_ecc/example.com.conf\n\
+                      Le_Domain=example.com\n\
+                      Le_Keylength=ec-256\n";
+
+        assert_eq!(
+            parse_domain_conf_path(output),
+            Some(PathBuf::from(
+                "/root/.acme.sh/example.com_ecc/example.com.conf"
+            ))
+        );
+    }
+
+    #[test]
+    fn test_parse_domain_conf_path_after_acme_notice_line() {
+        // acme.sh prints its ECC-detection notice on stdout before the
+        // `DOMAIN_CONF` line, so the marker is not always the first line.
+        let output = "[Tue Apr 14 16:55:10 UTC 2026] The domain 'example.com' seems to \
+                      already have an ECC cert, let's use it.\n\
+                      DOMAIN_CONF=/root/.acme.sh/example.com_ecc/example.com.conf\n\
+                      Le_Keylength=ec-256\n";
+
+        assert_eq!(
+            parse_domain_conf_path(output),
+            Some(PathBuf::from(
+                "/root/.acme.sh/example.com_ecc/example.com.conf"
+            ))
+        );
+    }
+
+    #[test]
+    fn test_parse_domain_conf_path_without_info_support() {
+        // acme.sh releases older than 3.0.2 have no `--info` command and print
+        // their usage instead, which must fall back to the default layout.
+        let output = "Usage: acme.sh  command ...[parameters]....\n";
+
+        assert!(parse_domain_conf_path(output).is_none());
+    }
+
+    #[test]
+    fn test_parse_domain_conf_path_ignores_empty_value() {
+        assert!(parse_domain_conf_path("DOMAIN_CONF=\nLe_Domain=example.com\n").is_none());
+    }
+
+    #[test]
+    fn test_parse_domain_conf_path_trims_whitespace() {
+        let output = "  DOMAIN_CONF=/root/.acme.sh/a.com/a.com.conf  \n";
+
+        assert_eq!(
+            parse_domain_conf_path(output),
+            Some(PathBuf::from("/root/.acme.sh/a.com/a.com.conf"))
+        );
+    }
+
+    #[test]
+    fn test_find_acme_cert_dir_without_any_directory() {
+        let temp_dir = TempDir::new().unwrap();
+
+        assert!(find_acme_cert_dir(temp_dir.path(), "example.com").is_none());
+    }
+
+    #[test]
+    fn test_find_acme_cert_dir_finds_ecc_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let ecc_dir = make_acme_cert_dir(temp_dir.path(), "example.com_ecc", &[]);
+
+        assert_eq!(
+            find_acme_cert_dir(temp_dir.path(), "example.com"),
+            Some(ecc_dir)
+        );
+    }
+
+    #[test]
+    fn test_find_acme_cert_dir_prefers_plain_over_ecc_directory() {
+        // Mirrors acme.sh's own `_initpath` preference, which `--install-cert`
+        // follows as well.
+        let temp_dir = TempDir::new().unwrap();
+        let plain_dir = make_acme_cert_dir(temp_dir.path(), "example.com", &[]);
+        make_acme_cert_dir(temp_dir.path(), "example.com_ecc", &[]);
+
+        assert_eq!(
+            find_acme_cert_dir(temp_dir.path(), "example.com"),
+            Some(plain_dir)
+        );
+    }
+
+    #[test]
+    fn test_classify_acme_cert_dir_incomplete_after_failed_issuance() {
+        // Reproduces what acme.sh leaves behind when domain validation fails:
+        // the domain key and its renewal conf, but no certificate. Installing
+        // from this state used to fail with
+        // `cat: .../fullchain.cer: No such file or directory`.
+        let temp_dir = TempDir::new().unwrap();
+        let cert_dir = make_acme_cert_dir(
+            temp_dir.path(),
+            "wp6.e2e.rocketlabsqa.ovh_ecc",
+            &[
+                "wp6.e2e.rocketlabsqa.ovh.key",
+                "wp6.e2e.rocketlabsqa.ovh.conf",
+            ],
+        );
+
+        assert_eq!(
+            classify_acme_cert_dir(&cert_dir, "wp6.e2e.rocketlabsqa.ovh"),
+            AcmeCertificateState::Incomplete
+        );
+    }
+
+    #[test]
+    fn test_classify_acme_cert_dir_incomplete_without_domain_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let cert_dir =
+            make_acme_cert_dir(temp_dir.path(), "example.com_ecc", &[ACME_FULLCHAIN_FILE]);
+
+        assert_eq!(
+            classify_acme_cert_dir(&cert_dir, "example.com"),
+            AcmeCertificateState::Incomplete
+        );
+    }
+
+    #[test]
+    fn test_classify_acme_cert_dir_ready_with_valid_certificate() {
+        let temp_dir = TempDir::new().unwrap();
+        let cert_dir = make_acme_cert_dir(temp_dir.path(), "example.com_ecc", &["example.com.key"]);
+
+        if !generate_self_signed_cert(&cert_dir.join(ACME_FULLCHAIN_FILE), 90) {
+            println!("openssl is not installed - skipping certificate validity assertions");
+            return;
+        }
+
+        assert_eq!(
+            classify_acme_cert_dir(&cert_dir, "example.com"),
+            AcmeCertificateState::Ready
+        );
+    }
+
+    #[test]
+    fn test_classify_acme_cert_dir_treats_unusable_certificate_as_expired() {
+        if !command_exists("openssl") {
+            println!("openssl is not installed - skipping certificate validity assertions");
+            return;
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let cert_dir = make_acme_cert_dir(
+            temp_dir.path(),
+            "example.com_ecc",
+            &["example.com.key", ACME_FULLCHAIN_FILE],
+        );
+
+        // `make_acme_cert_dir` writes placeholder content, so openssl cannot
+        // read a validity period from the "certificate".
+        assert_eq!(
+            classify_acme_cert_dir(&cert_dir, "example.com"),
+            AcmeCertificateState::Expired
+        );
+    }
+
+    #[test]
+    fn test_is_certificate_expiring_within_window() {
+        let temp_dir = TempDir::new().unwrap();
+        let cert_path = temp_dir.path().join(ACME_FULLCHAIN_FILE);
+
+        if !generate_self_signed_cert(&cert_path, 1) {
+            println!("openssl is not installed - skipping certificate validity assertions");
+            return;
+        }
+
+        // Valid right now, but not for another two days.
+        assert!(!is_certificate_expiring(&cert_path, 0));
+        assert!(is_certificate_expiring(&cert_path, 2 * 24 * 60 * 60));
+    }
+
+    #[test]
+    fn test_is_certificate_expiring_reads_the_leaf_of_a_full_chain() {
+        // acme.sh's `fullchain.cer` holds the leaf followed by the intermediates.
+        // The leaf is the one that has to decide, and misreading a chain would
+        // force a needless re-issue of every certificate the tool ever reuses.
+        let temp_dir = TempDir::new().unwrap();
+        let leaf_path = temp_dir.path().join("leaf.pem");
+        let intermediate_path = temp_dir.path().join("intermediate.pem");
+
+        if !generate_self_signed_cert(&leaf_path, 90)
+            || !generate_self_signed_cert(&intermediate_path, 3650)
+        {
+            println!("openssl is not installed - skipping certificate validity assertions");
+            return;
+        }
+
+        let chain_path = temp_dir.path().join(ACME_FULLCHAIN_FILE);
+        fs::write(
+            &chain_path,
+            format!(
+                "{}{}",
+                fs::read_to_string(&leaf_path).unwrap(),
+                fs::read_to_string(&intermediate_path).unwrap()
+            ),
+        )
+        .unwrap();
+
+        assert!(!is_certificate_expiring(&chain_path, 0));
+        // 100 days ahead the 90-day leaf is gone, even though the long-lived
+        // intermediate in the same file is not.
+        assert!(is_certificate_expiring(&chain_path, 100 * 24 * 60 * 60));
+    }
+
+    #[test]
+    fn test_is_certificate_expiring_with_unreadable_certificate() {
+        // An unparseable certificate is unusable and must be replaced, but when
+        // openssl itself is missing nothing can be concluded, and the documented
+        // degradation is to keep the certificate rather than force a re-issue.
+        let temp_dir = TempDir::new().unwrap();
+        let cert_path = temp_dir.path().join(ACME_FULLCHAIN_FILE);
+        fs::write(&cert_path, "not a certificate").unwrap();
+
+        if command_exists("openssl") {
+            assert!(is_certificate_expiring(&cert_path, 0));
+        } else {
+            assert!(!is_certificate_expiring(&cert_path, 0));
+        }
+    }
+
+    #[test]
+    fn test_forced_issuance_reason_per_state() {
+        // Only leftover state has to be overwritten with `--force`.
+        assert!(
+            AcmeCertificateState::Absent
+                .forced_issuance_reason()
+                .is_none()
+        );
+        assert!(
+            AcmeCertificateState::Ready
+                .forced_issuance_reason()
+                .is_none()
+        );
+        assert!(
+            AcmeCertificateState::Incomplete
+                .forced_issuance_reason()
+                .is_some()
+        );
+        assert!(
+            AcmeCertificateState::Expired
+                .forced_issuance_reason()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_describe_issuance_failure_for_verification_error() {
+        let message = describe_issuance_failure(
+            "example.com",
+            "/var/www/html/example.com",
+            "[Tue Apr 14 16:55:10 UTC 2026] example.com: Verify error: Invalid response",
+        );
+
+        assert!(message.contains("Domain verification failed for 'example.com'"));
+        assert!(message.contains("/var/www/html/example.com"));
+        assert!(message.contains("DNS has propagated"));
+    }
+
+    #[test]
+    fn test_describe_issuance_failure_keeps_acme_output() {
+        let message = describe_issuance_failure(
+            "example.com",
+            "/var/www/html/example.com",
+            "[Tue Apr 14 16:55:10 UTC 2026] Domain key exists, do you want to overwrite it?",
+        );
+
+        assert!(message.contains("without producing a certificate"));
+        assert!(message.contains("Domain key exists"));
+    }
+
+    #[test]
+    fn test_nginx_certificate_paths() {
+        let (privkey_path, fullchain_path) = nginx_certificate_paths("/etc/nginx/ssl/example.com");
+
+        assert_eq!(privkey_path, "/etc/nginx/ssl/example.com/privkey.pem");
+        assert_eq!(fullchain_path, "/etc/nginx/ssl/example.com/fullchain.pem");
+    }
 
     // ===== generate_ssl Tests =====
 

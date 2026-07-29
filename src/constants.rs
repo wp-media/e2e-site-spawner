@@ -72,6 +72,31 @@ pub const SITES_PATH: &str = "/var/www/html";
 /// - Contains sensitive private key material
 pub const SITES_SSL_PATH: &str = "/etc/nginx/ssl";
 
+/// Configuration home where acme.sh keeps its per-certificate state.
+///
+/// The tool always runs as root and the QA fleet installs acme.sh as root, so
+/// acme.sh stores every certificate it manages below this directory.
+///
+/// # Default Value
+/// `/root/.acme.sh` - acme.sh's `LE_CONFIG_HOME` for the root user
+///
+/// # Directory Structure
+/// ```text
+/// /root/.acme.sh/
+/// ├── account.conf
+/// └── example.com_ecc/        # `_ecc` suffix is used for ECC certs (acme.sh default)
+///     ├── example.com.conf    # Renewal configuration
+///     ├── example.com.key     # Private key
+///     └── fullchain.cer       # Certificate + intermediates
+/// ```
+///
+/// # Note
+/// acme.sh can be pointed elsewhere through `LE_CONFIG_HOME`/`CERT_HOME`. Those
+/// overrides are honoured by querying `acme.sh --info` first, so this constant is
+/// only the fallback used with acme.sh releases older than 3.0.2 (2022-02-04),
+/// which have no `--info` command.
+pub const ACME_CONFIG_HOME: &str = "/root/.acme.sh";
+
 /// Directory for Nginx site configuration files.
 ///
 /// Each spawned site gets its own `.conf` file in this directory.

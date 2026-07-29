@@ -211,7 +211,7 @@ echo -e "\n=== CARGO DOC ==="; cargo doc --no-deps
 
 As of this commit (rustc 1.97.1, edition 2024) the whole suite is clean, with
 **zero warnings**: `cargo fmt --check`, `cargo clippy --all-targets
---all-features -- -D warnings`, `cargo test` (122 pass; 17 are `#[ignore]`d
+--all-features -- -D warnings`, `cargo test` (141 pass; 17 are `#[ignore]`d
 because they need root / Nginx / MySQL / network), `cargo build`, and
 `cargo doc --no-deps` all exit 0. **Keep it green — do not introduce new
 fmt/clippy violations, test failures, or rustdoc warnings.**

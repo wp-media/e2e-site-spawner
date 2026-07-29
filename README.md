@@ -34,6 +34,8 @@ CLI for provisioning and managing WordPress or static sites on the QA LNMP serve
 
 - [`acme.sh`](https://github.com/acmesh-official/acme.sh) must be installed as root / sudo and in `$PATH` for any `--ssl` or `update --ssl` operation. The tool checks `acme.sh --version` before continuing.
 - DNS must already point the requested domain to the server and port 80 must be reachable for the HTTP-01 challenge.
+- A failed certificate request is recoverable: the tool inspects what acme.sh holds for the domain before issuing, overwrites leftover state from an earlier attempt (`acme.sh --issue --force`), reuses a still-valid certificate instead of re-issuing it, and refuses to install anything until acme.sh has actually produced a certificate. Just fix the DNS and run the command again.
+- `openssl` is used to check the validity of a certificate acme.sh already holds; when it is unavailable the certificate is assumed to be still valid.
 
 ## Installation
 
@@ -292,6 +294,7 @@ Because the release is assembled as a draft, any failure before the final step l
 
 - **"ELEVATED PRIVILEGES REQUIRED"** – rerun the command with `sudo` (or as root). The CLI prints the exact command to copy/paste.
 - **`acme.sh` missing** – install it from <https://github.com/acmesh-official/acme.sh> as root / sudo or omit `--ssl`. And make sure create a symlink to be accesible globaly by all users, so, `sudo acme.sh..` work. You can do it with: `sudo ln -sf "/root/acme.sh" /usr/local/bin/acme.sh`
+- **`acme.sh did not issue a certificate` / domain verification failed** – the domain is not resolving to this server yet, or port 80 is blocked. Nothing is installed in that case, and the `spawn` is fully reverted. Point the DNS record and re-run the same command: leftover acme.sh state from the failed attempt is detected and overwritten automatically.
 - **Nginx validation failures** – inspect `nginx -t` output. The tool cancels the operation if validation fails before or after file changes.
 - **Database errors** – ensure the MySQL root user can create databases without a password or update `src/constants.rs` to match your environment.
 
