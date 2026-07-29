@@ -1,6 +1,6 @@
 [package]
 name = "e2e-site-spawner"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Sandy Figueroa <sandy@wp-media.me>"]
 edition = "2024"
 
