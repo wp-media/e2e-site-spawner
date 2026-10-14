@@ -10,6 +10,12 @@
 //! it starts with `fastcgi_pass` followed by whitespace. Commented lines
 //! (`# fastcgi_pass …`) and sibling directives such as `fastcgi_pass_header`
 //! are therefore ignored.
+//!
+//! Parsing fails closed: any other line that still mentions `fastcgi_pass` as
+//! a whole word outside a comment (a one-line `location { fastcgi_pass …; }`
+//! block, a directive split across lines, two directives on one line, …) is
+//! reported as [`crate::nginx::php_fpm::PhpFpmConfigError::Unrecognized`] instead of being skipped,
+//! so a rewrite is never silently partial.
 
 use std::fmt;
 use std::ops::Range;
@@ -144,8 +150,9 @@ fn collect_socket_refs(content: &str) -> Result<Vec<SocketRef>, PhpFpmConfigErro
     let mut refs = Vec::new();
     let mut offset = 0;
     for line in content.split_inclusive('\n') {
-        if let Some(value_start) = directive_value_start(line) {
-            let r = parse_socket_value(line, value_start)
+        if mentions_fastcgi_pass(line) {
+            let r = directive_value_start(line)
+                .and_then(|value_start| parse_socket_value(line, value_start))
                 .ok_or_else(|| PhpFpmConfigError::Unrecognized(line.trim().to_string()))?;
             refs.push(SocketRef {
                 version: r.version,
@@ -158,6 +165,32 @@ fn collect_socket_refs(content: &str) -> Result<Vec<SocketRef>, PhpFpmConfigErro
         return Err(PhpFpmConfigError::NoFastcgiPass);
     }
     Ok(refs)
+}
+
+/// Tells whether `line` mentions the `fastcgi_pass` keyword as a whole word
+/// before any `#` comment.
+///
+/// Siblings such as `fastcgi_pass_header` do not count, because the keyword
+/// must not be followed (or preceded) by an identifier character. Any line
+/// for which this returns `true` must parse as a managed directive, or the
+/// whole config is rejected.
+///
+/// # Arguments
+///
+/// * `line` - One line, possibly with its trailing newline.
+///
+/// # Returns
+///
+/// `true` when the active (uncommented) part contains the keyword.
+fn mentions_fastcgi_pass(line: &str) -> bool {
+    let active = line.split('#').next().unwrap_or_default();
+    let bytes = active.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    active.match_indices(FASTCGI_PASS).any(|(start, _)| {
+        let end = start + FASTCGI_PASS.len();
+        let before = start.checked_sub(1).and_then(|i| bytes.get(i));
+        before.is_none_or(|&b| !is_ident(b)) && bytes.get(end).is_none_or(|&b| !is_ident(b))
+    })
 }
 
 /// Returns the byte index (within `line`) where a `fastcgi_pass` value
@@ -483,5 +516,116 @@ mod tests {
             set_php_version(before, v("8.4")).unwrap(),
             "fastcgi_pass unix:/var/run/php/php8.4-fpm.sock;"
         );
+    }
+
+    // ===== fail-closed layouts and edge cases =====
+
+    /// Asserts that both detect and set reject `content` as `Unrecognized`.
+    fn assert_unrecognized(content: &str) {
+        assert!(
+            matches!(
+                detect_php_version(content),
+                Err(PhpFpmConfigError::Unrecognized(_))
+            ),
+            "detect: {content:?}"
+        );
+        assert!(
+            matches!(
+                set_php_version(content, v("8.5")),
+                Err(PhpFpmConfigError::Unrecognized(_))
+            ),
+            "set: {content:?}"
+        );
+    }
+
+    #[test]
+    fn one_line_block_is_unrecognized() {
+        let c = format!(
+            "{}\nlocation ~ \\.php$ {{ fastcgi_pass unix:/var/run/php/php8.1-fpm.sock; }}\n",
+            legacy_http()
+        );
+        assert_unrecognized(&c);
+    }
+
+    #[test]
+    fn split_directive_is_unrecognized() {
+        for c in [
+            "fastcgi_pass\n    unix:/var/run/php/php8.1-fpm.sock;\n",
+            "  fastcgi_pass\r\n unix:/var/run/php/php8.1-fpm.sock;\r\n",
+            "fastcgi_pass",
+            "fastcgi_pass # value on next line\nunix:/var/run/php/php8.1-fpm.sock;\n",
+        ] {
+            assert_unrecognized(c);
+        }
+    }
+
+    #[test]
+    fn trailing_directive_on_same_line_is_unrecognized() {
+        assert_unrecognized(
+            "fastcgi_pass unix:/var/run/php/php8.1-fpm.sock; fastcgi_index index.php;\n",
+        );
+    }
+
+    #[test]
+    fn upstream_name_is_unrecognized() {
+        assert_unrecognized("location ~ \\.php$ {\n    fastcgi_pass php_backend;\n}\n");
+    }
+
+    #[test]
+    fn mention_after_comment_hash_is_ignored() {
+        let c = "fastcgi_pass unix:/var/run/php/php8.1-fpm.sock; # fastcgi_pass x\n";
+        assert_eq!(detect_php_version(c), Ok(v("8.1")));
+        assert_eq!(
+            detect_php_version("listen 80; # fastcgi_pass gone\n"),
+            Err(PhpFpmConfigError::NoFastcgiPass)
+        );
+    }
+
+    #[test]
+    fn include_line_is_ignored() {
+        let c = format!(
+            "include fastcgi_params;\ninclude /etc/nginx/fastcgi_pass.conf.d/*.conf;\n{}",
+            legacy_http()
+        );
+        // The second include mentions `fastcgi_pass` only as part of a path
+        // segment followed by `.`, which is a word boundary: fail closed.
+        assert_unrecognized(&c);
+        let c = format!("include fastcgi_params;\n{}", legacy_http());
+        assert_eq!(detect_php_version(&c), Ok(v("8.1")));
+        assert_eq!(
+            set_php_version(&c, v("8.5")).unwrap(),
+            c.replace("php8.1-fpm", "php8.5-fpm")
+        );
+    }
+
+    #[test]
+    fn non_ascii_content_around_directive() {
+        let c = "# café ☕ — config ñ\nserver_name ñandú.example;\n  fastcgi_pass unix:/var/run/php/php8.1-fpm.sock; # ü 日本\nroot /var/www/ü;\n";
+        assert_eq!(detect_php_version(c), Ok(v("8.1")));
+        assert_eq!(
+            set_php_version(c, v("10.2")).unwrap(),
+            c.replace("php8.1-fpm", "php10.2-fpm")
+        );
+    }
+
+    #[test]
+    fn crlf_config_with_multiple_blocks() {
+        let c = legacy_http_https().replace('\n', "\r\n");
+        assert_eq!(detect_php_version(&c), Ok(v("8.1")));
+        let after = set_php_version(&c, v("8.5")).unwrap();
+        assert_eq!(after, c.replace("php8.1-fpm", "php8.5-fpm"));
+        assert_eq!(after.matches("\r\n").count(), c.matches("\r\n").count());
+    }
+
+    #[test]
+    fn very_long_line() {
+        let pad = "x".repeat(200_000);
+        let c = format!("# {pad}\nfastcgi_pass unix:/var/run/php/php8.1-fpm.sock; # {pad}\n");
+        assert_eq!(detect_php_version(&c), Ok(v("8.1")));
+        assert_eq!(
+            set_php_version(&c, v("8.5")).unwrap(),
+            c.replace("php8.1-fpm", "php8.5-fpm")
+        );
+        assert_unrecognized(&format!("fastcgi_pass {pad};\n"));
     }
 }
