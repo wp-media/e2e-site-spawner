@@ -358,6 +358,152 @@ pub fn append_to_nginx_file(path: &str, content: &str) -> Result<(), FileCreatio
     Ok(())
 }
 
+/// Atomically replaces the full contents of an **existing** Nginx config file.
+///
+/// Used to write a rewritten config (e.g. a new PHP-FPM version) and to
+/// restore a backup. The new content goes to a uniquely named temp file in the
+/// same directory, which gets the target's permission mode and owner/group,
+/// is flushed with `sync_all`, then `rename`d over the target. Readers (and
+/// `nginx -t`) therefore see either the old file or the new one, never an
+/// empty or partial config. Any failure removes the temp file and leaves the
+/// target untouched.
+///
+/// Unlike [`create_nginx_file`] it never creates the target, so a typo in the
+/// path cannot spawn a stray config. Symlinks and non-regular files are
+/// refused, so the rename can never replace a link with a plain file.
+///
+/// # Arguments
+///
+/// * `path` - Path to the `.conf` file; validated like every other helper here.
+/// * `content` - New full contents; must not be blank.
+///
+/// # Returns
+///
+/// `Ok(())` once the new content is durably in place.
+///
+/// # Errors
+///
+/// * [`FileCreationError::InvalidPath`] - blank content, empty path, wrong
+///   extension, a path outside the allowed directories, or a target that is a
+///   symlink or not a regular file;
+/// * [`FileCreationError::PathTraversal`] - the path contains `../`;
+/// * [`FileCreationError::FileWriteFailed`] - the target does not exist, or
+///   the temp file cannot be created, written, synced or renamed;
+/// * [`FileCreationError::PermissionSetFailed`] - the mode or owner cannot be
+///   copied onto the temp file.
+pub fn overwrite_nginx_file(path: &str, content: &str) -> Result<(), FileCreationError> {
+    if content.trim().is_empty() {
+        return Err(FileCreationError::InvalidPath(
+            "Configuration content cannot be empty".to_string(),
+        ));
+    }
+    let file_path = get_validated_nginx_path(path)?;
+    let meta = existing_regular_file_metadata(&file_path, path)?;
+    let tmp_path = temp_sibling_path(&file_path, path)?;
+    let result = write_temp_then_rename(&tmp_path, &file_path, content, &meta, path);
+    if result.is_err() {
+        // Best effort: the temp file may not exist if creation itself failed.
+        let _ = fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+/// Returns the metadata of `file_path` without following symlinks, requiring
+/// an existing regular file.
+///
+/// # Arguments
+///
+/// * `file_path` - Validated target path.
+/// * `display` - Path as given by the caller, for error messages.
+///
+/// # Errors
+///
+/// `FileWriteFailed` when the file is missing/unreadable, `InvalidPath` when
+/// it is a symlink or not a regular file.
+fn existing_regular_file_metadata(
+    file_path: &Path,
+    display: &str,
+) -> Result<fs::Metadata, FileCreationError> {
+    let meta = fs::symlink_metadata(file_path).map_err(|e| {
+        FileCreationError::FileWriteFailed(format!("Cannot open file '{}': {}", display, e))
+    })?;
+    if meta.file_type().is_symlink() {
+        return Err(FileCreationError::InvalidPath(format!(
+            "Refusing to overwrite symlink '{}'",
+            display
+        )));
+    }
+    if !meta.is_file() {
+        return Err(FileCreationError::InvalidPath(format!(
+            "Not a regular file: '{}'",
+            display
+        )));
+    }
+    Ok(meta)
+}
+
+/// Builds a unique, hidden temp path next to `file_path` (same directory, so
+/// the final `rename` is atomic and never crosses filesystems).
+///
+/// # Arguments
+///
+/// * `file_path` - Validated target path.
+/// * `display` - Path as given by the caller, for error messages.
+///
+/// # Errors
+///
+/// `InvalidPath` when the target has no parent directory or file name.
+fn temp_sibling_path(file_path: &Path, display: &str) -> Result<PathBuf, FileCreationError> {
+    let invalid = || FileCreationError::InvalidPath(format!("Invalid target '{}'", display));
+    let dir = file_path.parent().ok_or_else(invalid)?;
+    let name = file_path.file_name().ok_or_else(invalid)?.to_string_lossy();
+    let suffix: u64 = rand::random();
+    Ok(dir.join(format!(".{name}.{}.{suffix:016x}.tmp", std::process::id())))
+}
+
+/// Writes `content` to a brand-new `tmp_path`, copies `meta`'s mode and
+/// owner/group onto it, syncs it, and renames it over `target`.
+///
+/// The caller removes `tmp_path` on error.
+///
+/// # Arguments
+///
+/// * `tmp_path` - Temp path; must not exist (`create_new` guarantees we never
+///   clobber another file).
+/// * `target` - File to replace.
+/// * `content` - New contents.
+/// * `meta` - Target metadata whose mode and ownership are preserved.
+/// * `display` - Path as given by the caller, for error messages.
+///
+/// # Errors
+///
+/// `FileWriteFailed` or `PermissionSetFailed`, with the OS error.
+fn write_temp_then_rename(
+    tmp_path: &Path,
+    target: &Path,
+    content: &str,
+    meta: &fs::Metadata,
+    display: &str,
+) -> Result<(), FileCreationError> {
+    use std::os::unix::fs::MetadataExt;
+    let write_err =
+        |e: io::Error| FileCreationError::FileWriteFailed(format!("'{}': {}", display, e));
+    let perm_err =
+        |e: io::Error| FileCreationError::PermissionSetFailed(format!("'{}': {}", display, e));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp_path)
+        .map_err(write_err)?;
+    file.write_all(content.as_bytes()).map_err(write_err)?;
+    // chown first: it may clear setuid/setgid bits, which the mode then restores.
+    std::os::unix::fs::fchown(&file, Some(meta.uid()), Some(meta.gid())).map_err(perm_err)?;
+    file.set_permissions(fs::Permissions::from_mode(meta.mode() & 0o7777))
+        .map_err(perm_err)?;
+    file.sync_all().map_err(write_err)?;
+    fs::rename(tmp_path, target).map_err(write_err)
+}
+
 /// Reloads the Nginx service to apply configuration changes.
 ///
 /// This function executes the `nginx -s reload` command to gracefully reload
@@ -1551,6 +1697,164 @@ mod tests {
         assert!(nested_path.parent().unwrap().exists());
 
         cleanup_test_dir(&test_dir);
+    }
+
+    // ===== Overwrite Tests =====
+
+    /// Creates a `TempDir` under `/tmp`, an allowed nginx prefix.
+    fn tmp_dir() -> tempfile::TempDir {
+        tempfile::TempDir::new_in("/tmp").unwrap()
+    }
+
+    /// Overwriting an existing file replaces its contents and keeps its mode.
+    #[test]
+    fn test_overwrite_existing_file() {
+        let dir = tmp_dir();
+        let path = dir.path().join("site.conf");
+        fs::write(&path, "server { listen 80; } # old and longer").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        overwrite_nginx_file(path.to_str().unwrap(), "server { listen 81; }").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "server { listen 81; }");
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+    }
+
+    /// A missing file is reported and never created.
+    #[test]
+    fn test_overwrite_missing_file() {
+        let dir = tmp_dir();
+        let path = dir.path().join("missing.conf");
+        let result = overwrite_nginx_file(path.to_str().unwrap(), "server {}");
+        assert!(matches!(result, Err(FileCreationError::FileWriteFailed(_))));
+        assert!(!path.exists());
+    }
+
+    /// Non-`.conf` paths are rejected before touching the file.
+    #[test]
+    fn test_overwrite_rejects_non_conf() {
+        let dir = tmp_dir();
+        let path = dir.path().join("site.txt");
+        fs::write(&path, "keep").unwrap();
+        let result = overwrite_nginx_file(path.to_str().unwrap(), "server {}");
+        assert!(matches!(result, Err(FileCreationError::InvalidPath(_))));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "keep");
+    }
+
+    /// Traversal paths are rejected.
+    #[test]
+    fn test_overwrite_rejects_traversal() {
+        let result = overwrite_nginx_file("/tmp/../etc/nginx/x.conf", "server {}");
+        assert!(matches!(result, Err(FileCreationError::PathTraversal(_))));
+    }
+
+    /// Empty paths and paths outside the allowed directories are rejected.
+    #[test]
+    fn test_overwrite_rejects_bad_locations() {
+        assert!(matches!(
+            overwrite_nginx_file("/home/x/site.conf", "server {}"),
+            Err(FileCreationError::InvalidPath(_))
+        ));
+        assert!(matches!(
+            overwrite_nginx_file("", "server {}"),
+            Err(FileCreationError::InvalidPath(_))
+        ));
+    }
+
+    /// Blank content is rejected and the file stays intact.
+    #[test]
+    fn test_overwrite_rejects_blank_content() {
+        let dir = tmp_dir();
+        let path = dir.path().join("site.conf");
+        fs::write(&path, "server {}").unwrap();
+        let result = overwrite_nginx_file(path.to_str().unwrap(), " \n\t");
+        assert!(matches!(result, Err(FileCreationError::InvalidPath(_))));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "server {}");
+    }
+
+    /// Lists the entries of `dir` other than `keep`, i.e. leftover temp files.
+    fn leftovers(dir: &Path, keep: &str) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != keep)
+            .collect()
+    }
+
+    /// Atomic overwrite replaces content, keeps mode and owner, and leaves no
+    /// temp file behind.
+    #[test]
+    fn test_overwrite_atomic_success_leaves_no_temp() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tmp_dir();
+        let path = dir.path().join("site.conf");
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o604)).unwrap();
+        let before = fs::metadata(&path).unwrap();
+
+        overwrite_nginx_file(path.to_str().unwrap(), "server { listen 82; }").unwrap();
+
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "server { listen 82; }");
+        assert_eq!(after.permissions().mode() & 0o7777, 0o604);
+        assert_eq!((after.uid(), after.gid()), (before.uid(), before.gid()));
+        assert!(leftovers(dir.path(), "site.conf").is_empty());
+    }
+
+    /// A failure while creating the temp file (read-only directory) leaves the
+    /// target untouched and no temp file behind.
+    #[test]
+    fn test_overwrite_failure_leaves_target_and_no_temp() {
+        let dir = tmp_dir();
+        let path = dir.path().join("site.conf");
+        fs::write(&path, "server {}").unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        // Root bypasses directory permissions, so the failure can't be simulated.
+        let is_root = unsafe { libc::geteuid() } == 0;
+
+        let result = overwrite_nginx_file(path.to_str().unwrap(), "server { listen 83; }");
+
+        let names = leftovers(dir.path(), "site.conf");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        if is_root {
+            return;
+        }
+        assert!(matches!(result, Err(FileCreationError::FileWriteFailed(_))));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "server {}");
+        assert!(names.is_empty(), "leftover temp files: {names:?}");
+    }
+
+    /// A symlink target is refused and neither the link nor its target change.
+    #[test]
+    fn test_overwrite_rejects_symlink() {
+        let dir = tmp_dir();
+        let real = dir.path().join("real.conf");
+        let link = dir.path().join("link.conf");
+        fs::write(&real, "server {}").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let result = overwrite_nginx_file(link.to_str().unwrap(), "server { listen 84; }");
+
+        assert!(matches!(result, Err(FileCreationError::InvalidPath(_))));
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&real).unwrap(), "server {}");
+    }
+
+    /// A directory named like a config is refused.
+    #[test]
+    fn test_overwrite_rejects_non_regular_file() {
+        let dir = tmp_dir();
+        let path = dir.path().join("dir.conf");
+        fs::create_dir(&path).unwrap();
+        let result = overwrite_nginx_file(path.to_str().unwrap(), "server {}");
+        assert!(matches!(result, Err(FileCreationError::InvalidPath(_))));
+        assert!(path.is_dir());
     }
 
     // ===== Append Tests =====

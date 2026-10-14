@@ -140,6 +140,7 @@ The order is PHP → WP → SSL so that the HTTPS block appended last uses the n
     - A resolver helper picks the requested version, or the detected one, or the default with a `⚠` warning. `update_with_ssl` uses it so the appended HTTPS block matches the HTTP block.
     - Keep each function under ~20 lines where practical by extracting small helpers.
   - `README.md` updated.
+  - Switch `update_with_ssl`'s raw `fs::write` revert to `overwrite_nginx_file` (deferred from the P2.2 audit).
 - **Tests:**
   - integration: `update x.com --php bad` → exit 2; `update --help` shows `--php` with no default; without root → privilege error;
   - the unit-testable resolver logic is a pure function `resolve_php_version(requested: Option<PhpVersion>, detected: Result<PhpVersion, _>) -> (PhpVersion, Option<warning>)`, with tests for all branches;
