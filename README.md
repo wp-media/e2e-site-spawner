@@ -163,7 +163,14 @@ Provides a comprehensive inventory of all configured sites on the server. The co
 - **Status** – Shows if the site is active or deactivated
 - **Management** – Identifies sites managed by e2sp vs. external configurations
 
-Output format:
+Output format (`<features>` is a comma-separated list in the order `ssl` (only when HTTPS is configured), `wp` (only when WordPress is installed), `php X.Y` (`php ?` if it cannot be detected)):
+
+```text
+<site> - <features> - (active|deactivated)            # managed by e2sp
+<site> - (active|deactivated) - not managed by e2sp   # any other config
+```
+
+Example:
 
 ```text
 Site list:

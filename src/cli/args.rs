@@ -264,13 +264,16 @@ pub fn build_cli() -> Command {
                 .after_help("EXAMPLES:\n    \
                     e2sp list                  # Show all configured sites\n\n\
                     OUTPUT FORMAT:\n    \
-                    The list shows each site with:\n    \
-                    • Site name (domain)\n    \
-                    • Status (active/inactive)\n    \
-                    • SSL enabled (yes/no)\n    \
-                    • WordPress installed (yes/no)\n    \
-                    • PHP-FPM version (php X.Y, or php ? if it cannot be detected)\n    \
-                    • Site path\n\n\
+                    Managed sites:   <site> - <features> - (active|deactivated)\n    \
+                    Unmanaged sites: <site> - (active|deactivated) - not managed by e2sp\n\n    \
+                    <features> is a comma-separated list, in this order:\n    \
+                    • ssl          HTTPS is configured (only when present)\n    \
+                    • wp           WordPress is installed (only when present)\n    \
+                    • php X.Y      PHP-FPM version (php ? if it cannot be detected)\n\n    \
+                    Example:\n    \
+                      example.com - ssl, wp, php 8.5 - (active)\n    \
+                      old-site.com - (active) - not managed by e2sp\n\n    \
+                    A summary with total, active, deactivated and managed counts follows.\n\n\
                     NOTES:\n    \
                     Sites are detected by scanning Nginx configuration files in /etc/nginx/conf.d/")
         )

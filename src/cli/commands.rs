@@ -1287,8 +1287,27 @@ fn format_site_features(
     features
 }
 
-/// Colours a feature label for terminal output (ssl green, wp blue, php
-/// magenta, undetected php yellow).
+/// Maps a feature to its terminal colour, kept pure so it is unit-testable
+/// without touching `colored`'s global override.
+///
+/// # Arguments
+///
+/// * `feature` - The feature to colour.
+///
+/// # Returns
+///
+/// Green for ssl, blue for wp, magenta for a detected PHP version and yellow
+/// for an undetected one (`php ?`).
+fn feature_color(feature: &SiteFeature) -> Color {
+    match feature {
+        SiteFeature::Ssl => Color::Green,
+        SiteFeature::WordPress => Color::Blue,
+        SiteFeature::Php(Some(_)) => Color::Magenta,
+        SiteFeature::Php(None) => Color::Yellow,
+    }
+}
+
+/// Colours a feature label for terminal output using [`feature_color`].
 ///
 /// # Arguments
 ///
@@ -1298,13 +1317,23 @@ fn format_site_features(
 ///
 /// The coloured label.
 fn colorize_feature(feature: &SiteFeature) -> String {
-    let label = feature.label();
-    match feature {
-        SiteFeature::Ssl => label.green().to_string(),
-        SiteFeature::WordPress => label.blue().to_string(),
-        SiteFeature::Php(Some(_)) => label.magenta().to_string(),
-        SiteFeature::Php(None) => label.yellow().to_string(),
-    }
+    feature.label().color(feature_color(feature)).to_string()
+}
+
+/// Detects the PHP-FPM version of a managed site's nginx config for `list`.
+///
+/// Any detection failure (no, foreign, malformed or disagreeing sockets) is
+/// folded into `None`, which `list` renders as `php ?`.
+///
+/// # Arguments
+///
+/// * `content` - Full nginx config file content (HTTP and optional HTTPS block).
+///
+/// # Returns
+///
+/// The single version every block agrees on, or `None`.
+fn detect_site_php_version(content: &str) -> Option<PhpVersion> {
+    nginx::php_fpm::detect_php_version(content).ok()
 }
 
 /// Lists all configured sites with their status and features.
@@ -1412,8 +1441,7 @@ pub fn list_sites() {
         let wp_config_path = format!("{}/{}/wp-config.php", SITES_PATH, base);
         // Check for WordPress by looking for wp-config.php in site root
         let has_wordpress = Path::new(&wp_config_path).exists();
-        // Any detection failure (hand-edited, missing or mixed sockets) shows as `php ?`
-        let php_version = nginx::php_fpm::detect_php_version(&content).ok();
+        let php_version = detect_site_php_version(&content);
 
         sites.push(SiteInfo {
             name: base,
@@ -2204,6 +2232,39 @@ mod tests {
         {
             assert!(colorize_feature(f).contains(&f.label()));
         }
+    }
+
+    #[test]
+    fn feature_colors_per_variant() {
+        assert_eq!(feature_color(&SiteFeature::Ssl), Color::Green);
+        assert_eq!(feature_color(&SiteFeature::WordPress), Color::Blue);
+        assert_eq!(feature_color(&SiteFeature::Php(v("8.5"))), Color::Magenta);
+        assert_eq!(feature_color(&SiteFeature::Php(None)), Color::Yellow);
+    }
+
+    #[test]
+    fn real_config_with_mixed_php_blocks_shows_unknown_php() {
+        // Same shape `update --ssl` produces: HTTP block followed by an HTTPS block
+        let http = build_spawn_config("qa9.example.com", false, PhpVersion::default_version())
+            .generate_config(nginx::config::NginxProtocol::Http);
+        let https = build_spawn_config("qa9.example.com", true, PhpVersion::default_version())
+            .generate_config(nginx::config::NginxProtocol::Https);
+        let https =
+            nginx::php_fpm::set_php_version(&https, PhpVersion::parse("8.1").expect("valid"))
+                .expect("template has a socket");
+        let content = format!("{http}\n{https}");
+        assert!(content.contains("php8.5-fpm.sock") && content.contains("php8.1-fpm.sock"));
+        assert_eq!(detect_site_php_version(&content), None);
+        assert_eq!(
+            labels(&format_site_features(
+                true,
+                false,
+                detect_site_php_version(&content)
+            )),
+            ["ssl", "php ?"]
+        );
+        // Sanity: the unmixed real config is detected through the same path
+        assert_eq!(detect_site_php_version(&http), v("8.5"));
     }
 
     #[test]
