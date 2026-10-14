@@ -358,6 +358,49 @@ pub fn append_to_nginx_file(path: &str, content: &str) -> Result<(), FileCreatio
     Ok(())
 }
 
+/// Replaces the full contents of an **existing** Nginx configuration file.
+///
+/// Used to write a rewritten config (e.g. a new PHP-FPM version) and to
+/// restore a backup. Unlike [`create_nginx_file`] it never creates a file, so
+/// a typo in the path cannot spawn a stray config; and unlike delete + create,
+/// it keeps the file's owner and permissions.
+///
+/// # Arguments
+///
+/// * `path` - Path to the `.conf` file; validated like every other helper here.
+/// * `content` - New full contents; must not be blank.
+///
+/// # Returns
+///
+/// `Ok(())` once the file has been truncated and fully written.
+///
+/// # Errors
+///
+/// * [`FileCreationError::InvalidPath`] - blank content, empty path, wrong
+///   extension, or a path outside the allowed directories;
+/// * [`FileCreationError::PathTraversal`] - the path contains `../`;
+/// * [`FileCreationError::FileWriteFailed`] - the file does not exist or
+///   cannot be written.
+pub fn overwrite_nginx_file(path: &str, content: &str) -> Result<(), FileCreationError> {
+    if content.trim().is_empty() {
+        return Err(FileCreationError::InvalidPath(
+            "Configuration content cannot be empty".to_string(),
+        ));
+    }
+    let file_path = get_validated_nginx_path(path)?;
+    // No `create(true)`: a missing file is an error, never something to make.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&file_path)
+        .map_err(|e| {
+            FileCreationError::FileWriteFailed(format!("Cannot open file '{}': {}", path, e))
+        })?;
+    file.write_all(content.as_bytes()).map_err(|e| {
+        FileCreationError::FileWriteFailed(format!("Cannot write to '{}': {}", path, e))
+    })
+}
+
 /// Reloads the Nginx service to apply configuration changes.
 ///
 /// This function executes the `nginx -s reload` command to gracefully reload
@@ -1551,6 +1594,80 @@ mod tests {
         assert!(nested_path.parent().unwrap().exists());
 
         cleanup_test_dir(&test_dir);
+    }
+
+    // ===== Overwrite Tests =====
+
+    /// Creates a `TempDir` under `/tmp`, an allowed nginx prefix.
+    fn tmp_dir() -> tempfile::TempDir {
+        tempfile::TempDir::new_in("/tmp").unwrap()
+    }
+
+    /// Overwriting an existing file replaces its contents and keeps its mode.
+    #[test]
+    fn test_overwrite_existing_file() {
+        let dir = tmp_dir();
+        let path = dir.path().join("site.conf");
+        fs::write(&path, "server { listen 80; } # old and longer").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        overwrite_nginx_file(path.to_str().unwrap(), "server { listen 81; }").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "server { listen 81; }");
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+    }
+
+    /// A missing file is reported and never created.
+    #[test]
+    fn test_overwrite_missing_file() {
+        let dir = tmp_dir();
+        let path = dir.path().join("missing.conf");
+        let result = overwrite_nginx_file(path.to_str().unwrap(), "server {}");
+        assert!(matches!(result, Err(FileCreationError::FileWriteFailed(_))));
+        assert!(!path.exists());
+    }
+
+    /// Non-`.conf` paths are rejected before touching the file.
+    #[test]
+    fn test_overwrite_rejects_non_conf() {
+        let dir = tmp_dir();
+        let path = dir.path().join("site.txt");
+        fs::write(&path, "keep").unwrap();
+        let result = overwrite_nginx_file(path.to_str().unwrap(), "server {}");
+        assert!(matches!(result, Err(FileCreationError::InvalidPath(_))));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "keep");
+    }
+
+    /// Traversal paths are rejected.
+    #[test]
+    fn test_overwrite_rejects_traversal() {
+        let result = overwrite_nginx_file("/tmp/../etc/nginx/x.conf", "server {}");
+        assert!(matches!(result, Err(FileCreationError::PathTraversal(_))));
+    }
+
+    /// Empty paths and paths outside the allowed directories are rejected.
+    #[test]
+    fn test_overwrite_rejects_bad_locations() {
+        assert!(matches!(
+            overwrite_nginx_file("/home/x/site.conf", "server {}"),
+            Err(FileCreationError::InvalidPath(_))
+        ));
+        assert!(matches!(
+            overwrite_nginx_file("", "server {}"),
+            Err(FileCreationError::InvalidPath(_))
+        ));
+    }
+
+    /// Blank content is rejected and the file stays intact.
+    #[test]
+    fn test_overwrite_rejects_blank_content() {
+        let dir = tmp_dir();
+        let path = dir.path().join("site.conf");
+        fs::write(&path, "server {}").unwrap();
+        let result = overwrite_nginx_file(path.to_str().unwrap(), " \n\t");
+        assert!(matches!(result, Err(FileCreationError::InvalidPath(_))));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "server {}");
     }
 
     // ===== Append Tests =====
