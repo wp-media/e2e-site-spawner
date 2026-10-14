@@ -252,7 +252,9 @@ pub const REMOVE_SSL_DIRECTORY: [SpawnSteps; 2] =
 /// spawn_site("example.local", true, false, PhpVersion::default_version());
 ///
 /// // Create a static site without SSL or WordPress, served by PHP-FPM 8.3
-/// spawn_site("static.local", false, true, PhpVersion::parse("8.3")?);
+/// // (static sites still need a live PHP-FPM socket)
+/// let php = PhpVersion::parse("8.3").expect("8.3 is a valid PHP version");
+/// spawn_site("static.local", false, true, php);
 /// ```
 ///
 /// # See Also
@@ -279,13 +281,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool, php: PhpVersion) {
     let mut steps_completed: Vec<SpawnSteps> = Vec::new();
 
     // Create Nginx configuration object
-    let nginx_config = nginx::config::NginxConfig::new(
-        site_name.to_string(),
-        SITES_PATH.to_string(),
-        NGINX_CONF_D_PATH.to_string(),
-        ssl,
-    )
-    .with_php_version(php);
+    let nginx_config = build_spawn_config(site_name, ssl, php);
     if check_if_site_exists(&nginx_config) {
         eprintln!(
             "✗ Site '{}' seems to already exist. Cannot continue.",
@@ -987,10 +983,34 @@ pub fn update_site(site_name: &str, wp: bool, ssl: bool) {
     finish_update(&nginx_config, &pre_update_config, summary);
 }
 
+/// Builds the [`nginx::config::NginxConfig`] for a new site from `spawn` args.
+///
+/// Pure (no I/O), so the `--php` wiring is unit-testable: the returned config
+/// is both what [`spawn_site`] preflights and what it renders.
+///
+/// # Arguments
+///
+/// * `site_name` - Domain of the new site.
+/// * `ssl` - Whether the config gets an SSL root.
+/// * `php` - PHP-FPM version written into every `fastcgi_pass`.
+///
+/// # Returns
+///
+/// A config under [`SITES_PATH`] / [`NGINX_CONF_D_PATH`] targeting `php`.
+fn build_spawn_config(site_name: &str, ssl: bool, php: PhpVersion) -> nginx::config::NginxConfig {
+    nginx::config::NginxConfig::new(
+        site_name.to_string(),
+        SITES_PATH.to_string(),
+        NGINX_CONF_D_PATH.to_string(),
+        ssl,
+    )
+    .with_php_version(php)
+}
+
 /// Exits with a `✗` error unless the PHP-FPM socket `nginx_config` targets is live.
 ///
-/// Preflight for `spawn` (the `--php` version) and `update --ssl` (the default), called before any mutation so a
-/// config is never written for a missing socket (`nginx -t` passes, but PHP
+/// Preflight for `spawn` (the `--php` version) and `update --ssl` (the
+/// default), called before any mutation so a config is never written for a missing socket (`nginx -t` passes, but PHP
 /// returns 502). The message logic lives in
 /// [`crate::utils::php::ensure_fpm_available`] so `update --php` (P4) reuses it.
 ///
@@ -2063,6 +2083,37 @@ fn remove_ssl_directory(ssl_root: &str) -> SslDirCleanup {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_build_spawn_config_carries_chosen_php_version() {
+        let php = PhpVersion::parse("8.3").expect("valid version");
+        let config = build_spawn_config("qa9.example.com", true, php);
+        assert_eq!(config.php_version, php);
+        assert_eq!(
+            config.php_version.fpm_socket_path(),
+            "/var/run/php/php8.3-fpm.sock"
+        );
+        for protocol in [
+            nginx::config::NginxProtocol::Http,
+            nginx::config::NginxProtocol::Https,
+        ] {
+            let rendered = config.generate_config(protocol);
+            assert!(rendered.contains("fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;"));
+            assert!(!rendered.contains("php8.5-fpm.sock"));
+        }
+    }
+
+    #[test]
+    fn test_build_spawn_config_default_version_and_paths() {
+        let config = build_spawn_config("qa9.example.com", false, PhpVersion::default_version());
+        assert_eq!(config.php_version, PhpVersion::default_version());
+        assert_eq!(config.root, format!("{SITES_PATH}/qa9.example.com"));
+        assert_eq!(
+            config.nginx_config_file_path,
+            format!("{NGINX_CONF_D_PATH}/qa9.example.com.conf")
+        );
+        assert!(config.ssl_root.is_none());
+    }
 
     /// Shorthand for a failed sub-step outcome.
     const FAILED: UpdateStepOutcome = Err(());

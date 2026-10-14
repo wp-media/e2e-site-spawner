@@ -346,24 +346,55 @@ mod tests {
             .stdout(predicate::str::contains("ELEVATED PRIVILEGES REQUIRED"));
     }
 
+    /// Deletes the qa9 site on drop, so cleanup also runs when an assertion
+    /// panics. Only constructed after this test's own spawn succeeded, so a
+    /// pre-existing site is never deleted.
+    struct DeleteSiteGuard(&'static str);
+
+    impl Drop for DeleteSiteGuard {
+        /// Runs `e2sp delete <site>` (non-interactive; no confirmation prompt).
+        fn drop(&mut self) {
+            let ok = cmd!()
+                .args(["delete", self.0])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !ok {
+                eprintln!("cleanup failed: run `sudo e2sp delete {}` manually", self.0);
+            }
+        }
+    }
+
     /// Spawns a static site on PHP-FPM 8.3 for real. Run manually as root on a
     /// disposable QA VM: `sudo cargo test -- --ignored test_spawn_with_php_as_root`.
     /// Succeeds only with a live php8.3-fpm socket; otherwise it must fail with
-    /// the preflight message and leave nothing behind.
+    /// the preflight message and leave nothing behind. Only ever touches qa9,
+    /// and refuses to run if qa9 already exists.
     #[test]
     #[ignore]
     fn test_spawn_with_php_as_root() {
-        let domain = "qa9.e2e.rocketlabsqa.ovh";
-        let conf = format!("/etc/nginx/conf.d/{domain}.conf");
+        const DOMAIN: &str = "qa9.e2e.rocketlabsqa.ovh";
+        let conf = format!("/etc/nginx/conf.d/{DOMAIN}.conf");
+        let pre_existing = [
+            conf.clone(),
+            format!("{conf}.deactivated"),
+            format!("/var/www/html/{DOMAIN}"),
+        ];
+        for path in &pre_existing {
+            assert!(
+                !std::path::Path::new(path).exists(),
+                "{path} already exists; remove the qa9 site before running this test"
+            );
+        }
         let out = cmd!()
-            .args(["spawn", domain, "--no-wp", "--php", "8.3"])
+            .args(["spawn", DOMAIN, "--no-wp", "--php", "8.3"])
             .output()
             .unwrap();
         if out.status.success() {
+            let _cleanup = DeleteSiteGuard(DOMAIN);
             let content = std::fs::read_to_string(&conf).unwrap();
             assert!(content.contains("php8.3-fpm.sock"));
             assert!(!content.contains("php8.5-fpm.sock"));
-            cmd!().args(["delete", domain]).assert().success();
         } else {
             let stderr = String::from_utf8_lossy(&out.stderr);
             assert!(stderr.contains("PHP-FPM 8.3 is not available"), "{stderr}");

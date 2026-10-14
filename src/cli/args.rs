@@ -77,7 +77,8 @@ const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\n", env!("CARGO_PKG_A
 /// - **Required**: Site name (domain)
 /// - **Options**:
 ///   - `--ssl`: Enable Let's Encrypt SSL
-///   - `--no-wp`: Skip WordPress installation
+///   - `--no-wp`: Skip WordPress installation (the site still needs a live
+///     PHP-FPM socket, since the templates always emit `fastcgi_pass`)
 ///   - `--php <VERSION>`: PHP-FPM version (`X.Y`, default
 ///     [`crate::constants::DEFAULT_PHP_VERSION`]), parsed into a
 ///     [`PhpVersion`] by [`PhpVersion::parse_cli`] (invalid values exit 2
@@ -173,13 +174,13 @@ pub fn build_cli() -> Command {
                 .arg(
                     Arg::new("no-wp")
                         .long("no-wp")
-                        .help("Create the site without WordPress installation")
+                        .help("Create the site without WordPress installation (still needs a live PHP-FPM socket, see --php)")
                         .action(clap::ArgAction::SetTrue),
                 )
                 .arg(
                     Arg::new("php")
                         .long("php")
-                        .help("PHP-FPM version (X.Y) the site's Nginx config uses; its socket must exist")
+                        .help("PHP-FPM version (X.Y) the site's Nginx config uses; its socket must exist, even with --no-wp")
                         .value_name("VERSION")
                         .value_parser(PhpVersion::parse_cli)
                         .default_value(DEFAULT_PHP_VERSION),

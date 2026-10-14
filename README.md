@@ -22,7 +22,7 @@ CLI for provisioning and managing WordPress or static sites on the QA LNMP serve
 ### System requirements
 
 - Linux host with nginx, PHP-FPM, and systemd (the tool reloads nginx via `systemctl`).
-- PHP-FPM ≥ 8.5 by default: generated configs use the socket `/var/run/php/php8.5-fpm.sock`. `spawn --php X.Y` targets `/var/run/php/phpX.Y-fpm.sock` instead. `spawn` and `update --ssl` check the socket before changing anything and refuse to run (exit 1, listing the installed PHP-FPM versions) when it is missing; a socket only exists while that PHP-FPM version is installed **and running**.
+- PHP-FPM: 8.5 is the default version (socket `/var/run/php/php8.5-fpm.sock`); any installed `X.Y` can be chosen with `spawn --php X.Y` (socket `/var/run/php/phpX.Y-fpm.sock`). Static (`--no-wp`) sites need it too, because every generated config contains `fastcgi_pass`. `spawn` and `update --ssl` check the socket before changing anything and refuse to run (exit 1, listing the installed PHP-FPM versions) when it is missing; a socket only exists while that PHP-FPM version is installed **and running**.
 - Root or sudo privileges. All commands exit early if they are not executed by root.
 - `curl` and `tar` for downloading and unpacking WordPress.
 - `mysql`/`mariadb` server reachable at `localhost` (host constant can be changed) with a root account that can create databases and grant privileges.
@@ -134,8 +134,8 @@ Creates `/var/www/html/<site>` along with `/etc/nginx/conf.d/<site>.conf`. When 
 Flags:
 
 - `--ssl` – triggers certificate issuance via acme.sh and appends the HTTPS server block.
-- `--no-wp` – skips the WordPress install and drops in the default static `index.html`.
-- `--php X.Y` – PHP-FPM version the nginx config passes PHP requests to (default `8.5`). Must be `X.Y` with 1–2 digits per part (e.g. `8.3`); anything else is rejected with exit code 2. If `/var/run/php/phpX.Y-fpm.sock` does not exist, `spawn` exits 1 before creating anything and lists the installed versions, e.g. `sudo e2sp spawn example.com --php 8.3`.
+- `--no-wp` – skips the WordPress install and drops in the default static `index.html`. The site still needs a live PHP-FPM socket (see `--php`): the generated config always contains `fastcgi_pass`.
+- `--php X.Y` – PHP-FPM version the nginx config passes PHP requests to (default `8.5`). Must be `X.Y` with 1–2 digits per part (e.g. `8.3`); anything else is rejected with exit code 2. If `/var/run/php/phpX.Y-fpm.sock` does not exist, `spawn` exits 1 before creating anything and lists the installed versions (this applies to `--no-wp` sites too), e.g. `sudo e2sp spawn example.com --php 8.3`.
 
 #### `delete`
 

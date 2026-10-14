@@ -119,7 +119,7 @@ The order is PHP → WP → SSL so that the HTTPS block appended last uses the n
   - `src/cli/args.rs`: `--php <VERSION>` with `value_parser(PhpVersion::parse_cli)`, `default_value(DEFAULT_PHP_VERSION)` so help shows `[default: 8.5]`, help text, and an `after_help` example. Also fix the stale module/`build_cli` docs that say `update` is "not yet implemented" and don't mention `list`.
   - `src/main.rs`: `get_one::<PhpVersion>("php")`.
   - `spawn_site(site_name, ssl, no_wp, php)`: preflight `is_fpm_available()` right after the existing validations and **before** any mutation. On failure: `✗ PHP-FPM 8.3 is not available (socket … not found; is php8.3-fpm installed and running?). Installed: 8.1, 8.5.` then exit 1. Then `NginxConfig::new(..).with_php_version(php)`. Update the doc and examples.
-  - `README.md`: command table + "What gets provisioned?" (PHP-FPM socket line), prerequisites (PHP-FPM ≥ 8.5 by default).
+  - `README.md`: command table + "What gets provisioned?" (PHP-FPM socket line), prerequisites (8.5 is the default PHP-FPM version; any installed `X.Y` can be chosen with `spawn --php X.Y`). State that static (`--no-wp`) sites also need a live PHP-FPM socket, because both templates always emit `fastcgi_pass`.
 - **Tests:** integration tests that run without root, because clap parses before the privilege gate:
   - `spawn x.com --php abc` → exit 2 with the error text;
   - `spawn x.com --php 8.5.1` → exit 2;
