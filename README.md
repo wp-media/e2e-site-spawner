@@ -148,7 +148,9 @@ Toggle site availability by renaming the nginx configuration (`example.conf` ↔
 Extends an existing site in-place:
 
 - `--wp` – installs WordPress into an existing static site after ensuring no previous installation or database exists.
-- `--ssl` – generates certificates, backs up the nginx config, appends the HTTPS block, validates nginx, and reverts on failure.
+- `--ssl` – generates certificates, backs up the nginx config, appends the HTTPS block, validates nginx, and reverts on failure (restoring the config and removing the new SSL directory). acme.sh still tracks the certificate: re-run `update --ssl` to reuse it, or `e2sp delete` / `acme.sh --remove -d <site>` to stop renewals.
+
+Each requested step runs even if the other fails. If a successful step changed the nginx config, the combined result is validated and nginx is reloaded so the change takes effect; if that final validation fails, the config is restored to its pre-update state. The command exits with status `1` if any requested step, the validation, or the reload failed.
 
 #### `list`
 
