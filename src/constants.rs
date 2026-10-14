@@ -126,6 +126,7 @@ pub const NGINX_CONF_D_PATH: &str = "/etc/nginx/conf.d";
 /// The template contains placeholders that are replaced during site creation:
 /// - `!{{site_name}}!` - The domain name
 /// - `!{{site_path}}!` - The document root path
+/// - `!{{php_fpm_socket}}!` - The PHP-FPM socket path
 ///
 /// # Contents
 /// Loaded at compile time from `./assets/http.conf.template`
@@ -146,7 +147,8 @@ pub const NGINX_HTTP_TEMPLATE: &str = include_str!("./assets/http.conf.template"
 /// # Template Variables
 /// The template contains placeholders that are replaced during site creation:
 /// - `!{{site_name}}!` - The domain name
-/// - `!{{site_path}}!` - The document root path  
+/// - `!{{site_path}}!` - The document root path
+/// - `!{{php_fpm_socket}}!` - The PHP-FPM socket path
 /// - `!{{ssl_path}}!` - Path to SSL certificates
 ///
 /// # Contents
