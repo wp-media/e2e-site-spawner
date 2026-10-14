@@ -34,7 +34,7 @@ use crate::nginx::{
 };
 use crate::nginx::{append_to_nginx_file, create_nginx_file, get_list_of_sites_nginx_file_paths};
 use crate::utils::db;
-use crate::utils::php;
+use crate::utils::php::{self, PhpVersion};
 use crate::utils::sites::{
     self, check_if_site_exists, create_file_with_content_if_not_exists, get_sudo_user,
     put_wordpress_in_site_directory, revert_site_spawn,
@@ -173,12 +173,15 @@ pub const REMOVE_SSL_DIRECTORY: [SpawnSteps; 2] =
 /// * `site_name` - The name of the site to create. Must be a valid domain name.
 /// * `ssl` - If `true`, generates SSL certificates and configures HTTPS.
 /// * `no_wp` - If `true`, creates a static site without WordPress installation.
+/// * `php` - PHP-FPM version written into `fastcgi_pass`; its socket must exist.
 ///
 /// # Process Flow
 ///
 /// 1. **Validation Phase**
 ///    - Validates Nginx configuration health
 ///    - Validates site name format
+///    - Preflights the chosen PHP-FPM socket (`php`); if it is missing,
+///      exits 1 listing the installed versions, before anything is written
 ///    - Displays SSL warnings if applicable
 ///
 /// 2. **Nginx Setup**
@@ -246,17 +249,17 @@ pub const REMOVE_SSL_DIRECTORY: [SpawnSteps; 2] =
 ///
 /// ```no_run
 /// // Create a WordPress site with SSL
-/// spawn_site("example.local", true, false);
+/// spawn_site("example.local", true, false, PhpVersion::default_version());
 ///
-/// // Create a static site without SSL or WordPress
-/// spawn_site("static.local", false, true);
+/// // Create a static site without SSL or WordPress, served by PHP-FPM 8.3
+/// spawn_site("static.local", false, true, PhpVersion::parse("8.3")?);
 /// ```
 ///
 /// # See Also
 ///
 /// * [`delete_site`] - To remove a created site
 /// * [`deactivate_site`] - To temporarily disable a site
-pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
+pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool, php: PhpVersion) {
     println!("Preparing to create site: {}", site_name);
     println!();
     // Phase 1: Pre-validation
@@ -281,7 +284,8 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         SITES_PATH.to_string(),
         NGINX_CONF_D_PATH.to_string(),
         ssl,
-    );
+    )
+    .with_php_version(php);
     if check_if_site_exists(&nginx_config) {
         eprintln!(
             "✗ Site '{}' seems to already exist. Cannot continue.",
@@ -985,10 +989,10 @@ pub fn update_site(site_name: &str, wp: bool, ssl: bool) {
 
 /// Exits with a `✗` error unless the PHP-FPM socket `nginx_config` targets is live.
 ///
-/// Preflight for `spawn` and `update --ssl`, called before any mutation so a
+/// Preflight for `spawn` (the `--php` version) and `update --ssl` (the default), called before any mutation so a
 /// config is never written for a missing socket (`nginx -t` passes, but PHP
 /// returns 502). The message logic lives in
-/// [`crate::utils::php::ensure_fpm_available`] so `--php` (P3/P4) reuses it.
+/// [`crate::utils::php::ensure_fpm_available`] so `update --php` (P4) reuses it.
 ///
 /// # Arguments
 ///

@@ -21,6 +21,7 @@ mod cli;
 pub mod constants;
 pub mod nginx;
 pub mod utils;
+use crate::utils::php::PhpVersion;
 use cli::commands::{
     activate_site, deactivate_site, delete_site, list_sites, spawn_site, update_site,
 };
@@ -68,7 +69,9 @@ fn main() {
             require_acme_sh();
         }
         let no_wp = matches.get_flag("no-wp");
-        spawn_site(site_name, ssl, no_wp);
+        // Invariant: clap validated `--php` and supplies DEFAULT_PHP_VERSION when absent.
+        let php = *matches.get_one::<PhpVersion>("php").unwrap();
+        spawn_site(site_name, ssl, no_wp, php);
     } else if let Some(matches) = matches.subcommand_matches("delete") {
         // Check for root/sudo privileges before executing
         require_elevated_privileges();

@@ -22,7 +22,7 @@ CLI for provisioning and managing WordPress or static sites on the QA LNMP serve
 ### System requirements
 
 - Linux host with nginx, PHP-FPM, and systemd (the tool reloads nginx via `systemctl`).
-- PHP-FPM 8.5 is the default version: generated configs use the socket `/var/run/php/php8.5-fpm.sock`. `spawn` and `update --ssl` check this socket before changing anything and refuse to run (exit 1, listing the installed PHP-FPM versions) when it is missing.
+- PHP-FPM ≥ 8.5 by default: generated configs use the socket `/var/run/php/php8.5-fpm.sock`. `spawn --php X.Y` targets `/var/run/php/phpX.Y-fpm.sock` instead. `spawn` and `update --ssl` check the socket before changing anything and refuse to run (exit 1, listing the installed PHP-FPM versions) when it is missing; a socket only exists while that PHP-FPM version is installed **and running**.
 - Root or sudo privileges. All commands exit early if they are not executed by root.
 - `curl` and `tar` for downloading and unpacking WordPress.
 - `mysql`/`mariadb` server reachable at `localhost` (host constant can be changed) with a root account that can create databases and grant privileges.
@@ -112,7 +112,7 @@ sudo e2sp --help
 
 | Command | Description |
 | --- | --- |
-| `spawn <site> [--ssl] [--no-wp]` | Creates a new site, sets up nginx, filesystem, default WordPress install, optional SSL. |
+| `spawn <site> [--ssl] [--no-wp] [--php X.Y]` | Creates a new site, sets up nginx, filesystem, default WordPress install, optional SSL. `--php` picks the PHP-FPM version (default `8.5`). |
 | `delete <site>` | Removes nginx configs, site files, SSL certificates, and the MySQL database. |
 | `deactivate <site>` | Renames the nginx config to `.conf.deactivated` to take the site offline without deleting assets. |
 | `activate <site>` | Reverts the `.deactivated` config back to `.conf` and reloads nginx. |
@@ -135,6 +135,7 @@ Flags:
 
 - `--ssl` – triggers certificate issuance via acme.sh and appends the HTTPS server block.
 - `--no-wp` – skips the WordPress install and drops in the default static `index.html`.
+- `--php X.Y` – PHP-FPM version the nginx config passes PHP requests to (default `8.5`). Must be `X.Y` with 1–2 digits per part (e.g. `8.3`); anything else is rejected with exit code 2. If `/var/run/php/phpX.Y-fpm.sock` does not exist, `spawn` exits 1 before creating anything and lists the installed versions, e.g. `sudo e2sp spawn example.com --php 8.3`.
 
 #### `delete`
 
@@ -207,6 +208,7 @@ sudo e2sp list
 | Site root | `/var/www/html/<site>` | chmod `0777` for compatibility with existing workflows. Owned by `www-data:www-data`, applied recursively once every file has been written. |
 | Uploads directory | `/var/www/html/<site>/wp-content/uploads` | WordPress does not ship this directory, so it is created up front (`0777`, `www-data:www-data`). WordPress sites only. |
 | Nginx config | `/etc/nginx/conf.d/<site>.conf` | HTTP block is always present; HTTPS block is appended when SSL is enabled. |
+| PHP-FPM socket | `/var/run/php/php<X.Y>-fpm.sock` | Referenced by every `fastcgi_pass` in the site config (HTTP and HTTPS). `X.Y` is `--php` (default `8.5`); the socket must exist before spawning. |
 | SSL material | `/etc/nginx/ssl/<site>/` | Contains `privkey.pem` and `fullchain.pem`. Created only when SSL is requested. |
 | Database | `wp_<site>` | Created through the MySQL root account and granted to the `wordpress` user with password `pleaseadvise` (see `src/constants.rs`). |
 

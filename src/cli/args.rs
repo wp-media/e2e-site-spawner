@@ -17,9 +17,14 @@
 //! - `delete` - Remove sites and all associated resources
 //! - `deactivate` - Temporarily disable site access
 //! - `activate` - Re-enable deactivated sites
+//! - `update` - Add WordPress and/or SSL to an existing site
+//! - `list` - Show every site configured on the server
 
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Arg, ArgMatches, ColorChoice, Command};
+
+use crate::constants::DEFAULT_PHP_VERSION;
+use crate::utils::php::PhpVersion;
 
 /// Application version string compiled from Cargo metadata.
 ///
@@ -73,6 +78,10 @@ const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\n", env!("CARGO_PKG_A
 /// - **Options**:
 ///   - `--ssl`: Enable Let's Encrypt SSL
 ///   - `--no-wp`: Skip WordPress installation
+///   - `--php <VERSION>`: PHP-FPM version (`X.Y`, default
+///     [`crate::constants::DEFAULT_PHP_VERSION`]), parsed into a
+///     [`PhpVersion`] by [`PhpVersion::parse_cli`] (invalid values exit 2
+///     before any privilege check)
 ///
 /// #### `delete`
 /// Completely removes sites:
@@ -89,6 +98,14 @@ const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\n", env!("CARGO_PKG_A
 /// - **Required**: Site name to activate
 /// - **Restores**: Full site access
 ///
+/// #### `update`
+/// Modifies an existing managed site:
+/// - **Required**: Site name to update
+/// - **Options**: `--wp` (install WordPress), `--ssl` (add HTTPS)
+///
+/// #### `list`
+/// Shows every configured site with its status, SSL, WordPress and path.
+///
 /// # Examples
 ///
 /// ## Basic Usage
@@ -102,15 +119,12 @@ const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\n", env!("CARGO_PKG_A
 /// # Create static HTML site
 /// e2sp spawn example.com --no-wp
 ///
+/// # Create a WordPress site served by PHP-FPM 8.3
+/// e2sp spawn example.com --php 8.3
+///
 /// # Delete a site
 /// e2sp delete example.com
 /// ```
-///
-/// # Future Commands
-///
-/// The following commands are planned but not yet implemented:
-/// - `update`: Modify existing sites (add WordPress/SSL)
-/// - `help`: Display detailed help information
 ///
 /// # Color Support
 ///
@@ -141,7 +155,8 @@ pub fn build_cli() -> Command {
                     e2sp spawn example.e2e.rocketlabsqa.ovh               # Create a WordPress site with database\n    \
                     e2sp spawn example.e2e.rocketlabsqa.ovh --ssl         # Create a WordPress site with SSL\n    \
                     e2sp spawn example.e2e.rocketlabsqa.ovh --no-wp       # Create a static site without WordPress\n    \
-                    e2sp spawn example.e2e.rocketlabsqa.ovh --no-wp --ssl # Create a static site with SSL")
+                    e2sp spawn example.e2e.rocketlabsqa.ovh --no-wp --ssl # Create a static site with SSL\n    \
+                    e2sp spawn example.e2e.rocketlabsqa.ovh --php 8.3     # Create a WordPress site using PHP-FPM 8.3")
                 .arg(
                     Arg::new("site_name")
                         .help("The name of the site to create (e.g., example.e2e.rocketlabsqa.ovh)")
@@ -160,6 +175,14 @@ pub fn build_cli() -> Command {
                         .long("no-wp")
                         .help("Create the site without WordPress installation")
                         .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("php")
+                        .long("php")
+                        .help("PHP-FPM version (X.Y) the site's Nginx config uses; its socket must exist")
+                        .value_name("VERSION")
+                        .value_parser(PhpVersion::parse_cli)
+                        .default_value(DEFAULT_PHP_VERSION),
                 ),
         )
         .subcommand(
@@ -249,11 +272,6 @@ pub fn build_cli() -> Command {
                     NOTES:\n    \
                     Sites are detected by scanning Nginx configuration files in /etc/nginx/conf.d/")
         )
-    // .subcommand(
-    //     Command::new("help")
-    //         .about("Displays help information")
-    //         .long_about("Shows detailed help information for all commands or a specific command"),
-    // )
 }
 
 /// Parses command-line arguments and returns the matches.
@@ -300,4 +318,88 @@ pub fn build_cli() -> Command {
 /// terminate the process if argument parsing fails or help/version is requested.
 pub fn get_matches() -> ArgMatches {
     build_cli().get_matches()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    /// Parses `args` (without the binary name) through [`build_cli`].
+    fn parse(args: &[&str]) -> Result<ArgMatches, clap::Error> {
+        build_cli().try_get_matches_from(std::iter::once("e2sp").chain(args.iter().copied()))
+    }
+
+    /// Returns the `--php` value of a successfully parsed `spawn` invocation.
+    fn spawn_php(args: &[&str]) -> PhpVersion {
+        let matches = parse(args).expect("spawn should parse");
+        let spawn = matches
+            .subcommand_matches("spawn")
+            .expect("spawn subcommand");
+        *spawn
+            .get_one::<PhpVersion>("php")
+            .expect("php always has a value")
+    }
+
+    #[test]
+    fn test_spawn_php_defaults_to_default_version() {
+        let php = spawn_php(&["spawn", "x.com"]);
+        assert_eq!(php, PhpVersion::default_version());
+        assert_eq!(php.to_string(), DEFAULT_PHP_VERSION);
+    }
+
+    #[test]
+    fn test_spawn_php_accepts_explicit_version() {
+        assert_eq!(
+            spawn_php(&["spawn", "x.com", "--php", "8.3"]).to_string(),
+            "8.3"
+        );
+    }
+
+    #[test]
+    fn test_spawn_php_accepts_equals_syntax_with_other_flags() {
+        let php = spawn_php(&["spawn", "x.com", "--ssl", "--no-wp", "--php=7.4"]);
+        assert_eq!(php.to_string(), "7.4");
+    }
+
+    #[test]
+    fn test_spawn_php_rejects_invalid_values() {
+        for bad in [
+            "abc", "8", "8.5.1", "v8.5", " 8.5", "8.x", "8.5/x", "100.1", "",
+        ] {
+            let err = parse(&["spawn", "x.com", "--php", bad]).expect_err(bad);
+            assert!(
+                matches!(
+                    err.kind(),
+                    ErrorKind::ValueValidation | ErrorKind::InvalidValue
+                ),
+                "{bad:?} gave {:?}",
+                err.kind()
+            );
+        }
+    }
+
+    #[test]
+    fn test_spawn_php_requires_a_value() {
+        assert!(parse(&["spawn", "x.com", "--php"]).is_err());
+    }
+
+    #[test]
+    fn test_spawn_php_rejects_repeated_flag() {
+        let err =
+            parse(&["spawn", "x.com", "--php", "8.3", "--php", "8.4"]).expect_err("repeated flag");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn test_php_flag_is_not_accepted_by_update_yet() {
+        // `update --php` arrives in P4; until then the flag is spawn-only.
+        let err = parse(&["update", "x.com", "--php", "8.3"]).expect_err("unknown flag");
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn test_default_php_version_constant_passes_the_cli_parser() {
+        assert!(PhpVersion::parse_cli(DEFAULT_PHP_VERSION).is_ok());
+    }
 }
