@@ -440,6 +440,10 @@ pub const DB_COLLATION: &str = "utf8mb4_general_ci";
 /// Must be in the strict `X.Y` form accepted by
 /// [`crate::utils::php::PhpVersion`]; a unit test enforces this.
 ///
+/// When changing it, also change `FALLBACK_DEFAULT` in `src/utils/php.rs`;
+/// the `default_constant_parses_and_matches_fallback` test fails if they
+/// disagree.
+///
 /// # Default Value
 /// `8.5` - PHP 8.5 (GA 2025-11-20)
 pub const DEFAULT_PHP_VERSION: &str = "8.5";

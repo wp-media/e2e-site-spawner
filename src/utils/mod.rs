@@ -18,7 +18,4 @@ pub mod ssl;
 pub mod validators;
 
 /// PHP version parsing and PHP-FPM socket discovery.
-// Consumers arrive in later phases of issue #6 (P2.1 nginx model, P3 spawn
-// `--php`); until then most items are unused in this binary crate.
-#[allow(dead_code)]
 pub mod php;

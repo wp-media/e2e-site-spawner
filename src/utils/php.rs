@@ -10,6 +10,7 @@
 
 use std::fmt;
 use std::fs;
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -25,8 +26,9 @@ const SOCKET_PREFIX: &str = "php";
 const SOCKET_SUFFIX: &str = "-fpm.sock";
 
 /// Fallback used by [`PhpVersion::default_version`] if
-/// [`DEFAULT_PHP_VERSION`] ever fails to parse. A unit test asserts both agree,
-/// so this only exists to avoid a runtime panic.
+/// [`DEFAULT_PHP_VERSION`] ever fails to parse. Must be changed together with
+/// that constant; the `default_constant_parses_and_matches_fallback` test
+/// fails if they disagree. It only exists to avoid a runtime panic.
 const FALLBACK_DEFAULT: PhpVersion = PhpVersion { major: 8, minor: 5 };
 
 /// A validated PHP `major.minor` version, e.g. `8.5`.
@@ -57,6 +59,10 @@ impl PhpVersion {
     ///
     /// * `s` - Raw input, e.g. `"8.5"`. Not trimmed.
     ///
+    /// # Returns
+    ///
+    /// The parsed [`PhpVersion`].
+    ///
     /// # Errors
     ///
     /// Returns a human-readable message for any other shape, e.g. `8`,
@@ -75,6 +81,10 @@ impl PhpVersion {
     /// # Arguments
     ///
     /// * `s` - The raw CLI value.
+    ///
+    /// # Returns
+    ///
+    /// The parsed [`PhpVersion`].
     ///
     /// # Errors
     ///
@@ -112,21 +122,34 @@ impl PhpVersion {
         dir.join(self.socket_file_name())
     }
 
-    /// Whether this version's FPM socket exists in [`PHP_FPM_SOCKET_DIR`].
+    /// Whether this version's FPM socket is present in [`PHP_FPM_SOCKET_DIR`].
     ///
     /// A socket only exists while that PHP-FPM version is installed **and
     /// running**, so `false` can also mean "installed but stopped".
+    ///
+    /// # Returns
+    ///
+    /// `true` if `php<X.Y>-fpm.sock` resolves (following symlinks) to a Unix
+    /// socket, `false` otherwise. See [`PhpVersion::is_fpm_available_in`].
     pub fn is_fpm_available(&self) -> bool {
         self.is_fpm_available_in(Path::new(PHP_FPM_SOCKET_DIR))
     }
 
-    /// Whether this version's FPM socket exists in `dir`.
+    /// Whether this version's FPM socket is present in `dir`.
+    ///
+    /// Uses the same check as [`installed_fpm_versions`], so the two never
+    /// disagree.
     ///
     /// # Arguments
     ///
     /// * `dir` - Directory holding PHP-FPM sockets.
+    ///
+    /// # Returns
+    ///
+    /// `true` only if the entry is a Unix socket or a symlink to one. Missing
+    /// entries, plain files, directories, and dangling symlinks yield `false`.
     pub fn is_fpm_available_in(&self, dir: &Path) -> bool {
-        self.fpm_socket_path_in(dir).exists()
+        is_socket(&self.fpm_socket_path_in(dir))
     }
 }
 
@@ -171,10 +194,16 @@ fn parse_component(s: &str) -> Option<u8> {
     s.parse().ok()
 }
 
-/// Lists PHP versions that have a `php<X.Y>-fpm.sock` file in `dir`.
+/// Lists PHP versions that have a live `php<X.Y>-fpm.sock` socket in `dir`.
 ///
-/// Entries whose name does not match the strict pattern (e.g. `php-fpm.sock`,
-/// `php8.5-fpm.pid`) are ignored.
+/// An entry counts only if its name matches the strict pattern **and** it
+/// passes the same socket check as [`PhpVersion::is_fpm_available_in`]
+/// (a Unix socket, or a symlink to one). Non-matching names (e.g.
+/// `php-fpm.sock`, `php8.5-fpm.pid`), plain files, directories, dangling
+/// symlinks, and entries `read_dir` fails to read are skipped.
+///
+/// No de-duplication is needed: directory entry names are unique and only
+/// canonical version strings parse, so each version appears at most once.
 ///
 /// # Arguments
 ///
@@ -182,18 +211,37 @@ fn parse_component(s: &str) -> Option<u8> {
 ///
 /// # Returns
 ///
-/// Sorted, de-duplicated versions; empty if `dir` is missing or unreadable.
+/// Versions sorted ascending; empty if `dir` is missing or unreadable.
 pub fn installed_fpm_versions(dir: &Path) -> Vec<PhpVersion> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut versions: Vec<PhpVersion> = entries
         .filter_map(Result::ok)
-        .filter_map(|e| version_from_socket_name(&e.file_name().to_string_lossy()))
+        .filter_map(|e| {
+            let version = version_from_socket_name(&e.file_name().to_string_lossy())?;
+            is_socket(&e.path()).then_some(version)
+        })
         .collect();
     versions.sort_unstable();
-    versions.dedup();
     versions
+}
+
+/// Whether `path` resolves to a Unix socket.
+///
+/// Uses [`fs::metadata`], which follows symlinks, so a symlink to a live
+/// socket counts while a dangling one does not.
+///
+/// # Arguments
+///
+/// * `path` - Path to inspect.
+///
+/// # Returns
+///
+/// `true` for a socket (directly or via symlink); `false` for anything else,
+/// including missing or inaccessible paths.
+fn is_socket(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|m| m.file_type().is_socket())
 }
 
 /// Extracts the version from a socket file name like `php8.5-fpm.sock`.
@@ -211,7 +259,23 @@ fn version_from_socket_name(name: &str) -> Option<PhpVersion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixListener;
     use tempfile::TempDir;
+
+    /// Temp dir with a short name so socket paths stay under the ~104-byte
+    /// `sun_path` limit on macOS.
+    fn short_tempdir() -> TempDir {
+        tempfile::Builder::new()
+            .prefix("p")
+            .tempdir()
+            .expect("tempdir")
+    }
+
+    /// Binds a real Unix socket at `path`; keep the listener alive for the test.
+    fn bind(path: &Path) -> UnixListener {
+        UnixListener::bind(path).expect("bind socket")
+    }
 
     /// Shorthand constructor for expected values.
     fn v(major: u8, minor: u8) -> PhpVersion {
@@ -265,11 +329,35 @@ mod tests {
 
     #[test]
     fn fpm_availability_follows_socket_existence() {
-        let dir = TempDir::new().expect("tempdir");
+        let dir = short_tempdir();
         assert!(!v(8, 5).is_fpm_available_in(dir.path()));
-        fs::write(v(8, 5).fpm_socket_path_in(dir.path()), "").expect("write");
+        let _l = bind(&v(8, 5).fpm_socket_path_in(dir.path()));
         assert!(v(8, 5).is_fpm_available_in(dir.path()));
         assert!(!v(8, 1).is_fpm_available_in(dir.path()));
+    }
+
+    #[test]
+    fn fpm_availability_rejects_non_sockets() {
+        let dir = short_tempdir();
+        fs::write(v(8, 1).fpm_socket_path_in(dir.path()), "").expect("write");
+        fs::create_dir(v(8, 2).fpm_socket_path_in(dir.path())).expect("mkdir");
+        symlink(
+            dir.path().join("gone"),
+            v(8, 3).fpm_socket_path_in(dir.path()),
+        )
+        .expect("symlink");
+        for minor in 1..=3 {
+            assert!(!v(8, minor).is_fpm_available_in(dir.path()), "8.{minor}");
+        }
+    }
+
+    #[test]
+    fn fpm_availability_accepts_symlink_to_socket() {
+        let dir = short_tempdir();
+        let target = dir.path().join("real.sock");
+        let _l = bind(&target);
+        symlink(&target, v(8, 4).fpm_socket_path_in(dir.path())).expect("symlink");
+        assert!(v(8, 4).is_fpm_available_in(dir.path()));
     }
 
     #[test]
@@ -286,7 +374,7 @@ mod tests {
 
     #[test]
     fn installed_versions_filters_and_sorts() {
-        let dir = TempDir::new().expect("tempdir");
+        let dir = short_tempdir();
         let names = [
             "php8.5-fpm.sock",
             "php8.10-fpm.sock",
@@ -297,15 +385,28 @@ mod tests {
             "php08.1-fpm.sock",
             "other.sock",
         ];
-        for n in names {
-            fs::write(dir.path().join(n), "").expect("write");
-        }
-        // A directory with a matching name still counts; only the name is checked.
-        fs::create_dir(dir.path().join("php7.4-fpm.sock")).expect("mkdir");
+        let _listeners: Vec<UnixListener> =
+            names.iter().map(|n| bind(&dir.path().join(n))).collect();
+        // A symlink to a live socket counts.
+        symlink(
+            dir.path().join("php8.5-fpm.sock"),
+            dir.path().join("php7.4-fpm.sock"),
+        )
+        .expect("symlink");
         assert_eq!(
             installed_fpm_versions(dir.path()),
             vec![v(7, 4), v(8, 1), v(8, 5), v(8, 10)]
         );
+    }
+
+    #[test]
+    fn installed_versions_skip_non_sockets_with_matching_names() {
+        let dir = short_tempdir();
+        fs::write(dir.path().join("php8.1-fpm.sock"), "").expect("write");
+        fs::create_dir(dir.path().join("php8.2-fpm.sock")).expect("mkdir");
+        symlink(dir.path().join("gone"), dir.path().join("php8.3-fpm.sock")).expect("symlink");
+        let _l = bind(&dir.path().join("php8.4-fpm.sock"));
+        assert_eq!(installed_fpm_versions(dir.path()), vec![v(8, 4)]);
     }
 
     #[test]
