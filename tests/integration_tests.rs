@@ -282,6 +282,126 @@ mod tests {
         }
     }
 
+    // ===== Spawn --php Tests =====
+    // clap validates `--php` before main() reaches the privilege gate, so
+    // invalid values exit 2 even without root.
+
+    #[test]
+    fn test_spawn_php_non_numeric_rejected_before_privilege_gate() {
+        let mut cmd = cmd!();
+        cmd.args(["spawn", TEST_DOMAIN, "--php", "abc"]);
+        cmd.assert()
+            .failure()
+            .code(2)
+            .stderr(predicate::str::contains("invalid value 'abc'"))
+            .stderr(predicate::str::contains("--php"))
+            .stdout(predicate::str::contains("ELEVATED PRIVILEGES REQUIRED").not());
+    }
+
+    #[test]
+    fn test_spawn_php_patch_version_rejected() {
+        let mut cmd = cmd!();
+        cmd.args(["spawn", TEST_DOMAIN, "--php", "8.5.1"]);
+        cmd.assert()
+            .failure()
+            .code(2)
+            .stderr(predicate::str::contains("invalid value '8.5.1'"));
+    }
+
+    #[test]
+    fn test_spawn_php_path_injection_rejected() {
+        let mut cmd = cmd!();
+        cmd.args(["spawn", TEST_DOMAIN, "--php", "8.5/../../x"]);
+        cmd.assert().failure().code(2);
+    }
+
+    #[test]
+    fn test_spawn_php_missing_value_rejected() {
+        let mut cmd = cmd!();
+        cmd.args(["spawn", TEST_DOMAIN, "--php"]);
+        cmd.assert().failure().code(2);
+    }
+
+    #[test]
+    fn test_spawn_help_documents_php_flag_and_default() {
+        let mut cmd = cmd!();
+        cmd.args(["spawn", "--help"]);
+        cmd.assert()
+            .success()
+            .stdout(predicate::str::contains("--php <VERSION>"))
+            .stdout(predicate::str::contains("default: 8.5"))
+            .stdout(predicate::str::contains("--php 8.3"));
+    }
+
+    #[test]
+    fn test_spawn_valid_php_reaches_privilege_gate() {
+        if is_running_as_root() {
+            return; // Covered by the #[ignore]d root test below.
+        }
+        let mut cmd = cmd!();
+        cmd.args(["spawn", TEST_DOMAIN, "--php", "8.3"]);
+        cmd.assert()
+            .failure()
+            .code(1)
+            .stdout(predicate::str::contains("ELEVATED PRIVILEGES REQUIRED"));
+    }
+
+    /// Deletes the qa9 site on drop, so cleanup also runs when an assertion
+    /// panics. Only constructed after this test's own spawn succeeded, so a
+    /// pre-existing site is never deleted.
+    struct DeleteSiteGuard(&'static str);
+
+    impl Drop for DeleteSiteGuard {
+        /// Runs `e2sp delete <site>` (non-interactive; no confirmation prompt).
+        fn drop(&mut self) {
+            let ok = cmd!()
+                .args(["delete", self.0])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !ok {
+                eprintln!("cleanup failed: run `sudo e2sp delete {}` manually", self.0);
+            }
+        }
+    }
+
+    /// Spawns a static site on PHP-FPM 8.3 for real. Run manually as root on a
+    /// disposable QA VM: `sudo cargo test -- --ignored test_spawn_with_php_as_root`.
+    /// Succeeds only with a live php8.3-fpm socket; otherwise it must fail with
+    /// the preflight message and leave nothing behind. Only ever touches qa9,
+    /// and refuses to run if qa9 already exists.
+    #[test]
+    #[ignore]
+    fn test_spawn_with_php_as_root() {
+        const DOMAIN: &str = "qa9.e2e.rocketlabsqa.ovh";
+        let conf = format!("/etc/nginx/conf.d/{DOMAIN}.conf");
+        let pre_existing = [
+            conf.clone(),
+            format!("{conf}.deactivated"),
+            format!("/var/www/html/{DOMAIN}"),
+        ];
+        for path in &pre_existing {
+            assert!(
+                !std::path::Path::new(path).exists(),
+                "{path} already exists; remove the qa9 site before running this test"
+            );
+        }
+        let out = cmd!()
+            .args(["spawn", DOMAIN, "--no-wp", "--php", "8.3"])
+            .output()
+            .unwrap();
+        if out.status.success() {
+            let _cleanup = DeleteSiteGuard(DOMAIN);
+            let content = std::fs::read_to_string(&conf).unwrap();
+            assert!(content.contains("php8.3-fpm.sock"));
+            assert!(!content.contains("php8.5-fpm.sock"));
+        } else {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(stderr.contains("PHP-FPM 8.3 is not available"), "{stderr}");
+            assert!(!std::path::Path::new(&conf).exists());
+        }
+    }
+
     // ===== Helper Functions =====
 
     /// Check if running as root (same logic as main.rs)
