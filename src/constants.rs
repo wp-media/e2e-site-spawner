@@ -434,3 +434,21 @@ pub const DB_CHARSET: &str = "utf8mb4";
 /// WordPress works with any utf8mb4 collation, but `utf8mb4_general_ci`
 /// provides the best balance of performance and compatibility.
 pub const DB_COLLATION: &str = "utf8mb4_general_ci";
+
+/// PHP version used for new sites when no `--php` option is given.
+///
+/// Must be in the strict `X.Y` form accepted by
+/// [`crate::utils::php::PhpVersion`]; a unit test enforces this.
+///
+/// # Default Value
+/// `8.5` - PHP 8.5 (GA 2025-11-20)
+pub const DEFAULT_PHP_VERSION: &str = "8.5";
+
+/// Directory holding the PHP-FPM Unix sockets (`php<X.Y>-fpm.sock`).
+///
+/// Debian/Ubuntu PHP-FPM packages create one socket per installed and
+/// running version here. `/var/run` is a symlink to `/run` on these systems.
+///
+/// # Default Value
+/// `/var/run/php`
+pub const PHP_FPM_SOCKET_DIR: &str = "/var/run/php";
