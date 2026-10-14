@@ -928,7 +928,8 @@ pub fn activate_site(site_name: &str) {
 ///
 /// Never panics; exits the process with status code `1` if the site name is
 /// invalid, the Nginx configuration is invalid or unreadable, the site does
-/// not exist, it is not managed by e2sp, its config is a symlink, `ssl` needs
+/// not exist, it is not managed by e2sp, `ssl`/`php` would write a config
+/// that is a symlink or not a regular file, `ssl` needs
 /// an undetectable PHP version, the needed PHP-FPM socket is missing,
 /// any requested sub-step failed, or the final Nginx validation/reload failed.
 /// Exits with `0` only when every requested step succeeded and any needed
@@ -957,6 +958,9 @@ pub fn update_site(site_name: &str, wp: bool, ssl: bool, php: Option<PhpVersion>
     }
     let base_config = build_spawn_config(site_name, ssl, PhpVersion::default_version());
     exit_unless_existing_managed_site(&base_config);
+    if writes_nginx_config(ssl, php) {
+        exit_unless_regular_config_file(&base_config);
+    }
     // Taken before any step runs, so the final gate can undo the combined result
     let pre_update_config =
         read_nginx_config_backup(&base_config).unwrap_or_else(|()| process::exit(1));
@@ -1002,12 +1006,29 @@ fn exit_unless_existing_managed_site(nginx_config: &nginx::config::NginxConfig) 
         );
         process::exit(1);
     }
-    exit_unless_regular_config_file(nginx_config);
+}
+
+/// Whether the requested `update` steps write the site's Nginx config.
+///
+/// Only `--ssl` (HTTPS append) and `--php` (socket rewrite) do; `--wp` never
+/// touches the config, so it needs no regular-file check.
+///
+/// # Arguments
+///
+/// * `ssl` - `--ssl` was passed.
+/// * `php` - The `--php` value, if any.
+///
+/// # Returns
+///
+/// `true` when at least one requested step writes the config.
+fn writes_nginx_config(ssl: bool, php: Option<PhpVersion>) -> bool {
+    ssl || php.is_some()
 }
 
 /// Exits with a `✗` error unless the site's config is a regular file.
 ///
-/// `--ssl` appends through a symlink while every restore
+/// Called only when a requested step writes the config (see
+/// [`writes_nginx_config`]). `--ssl` appends through a symlink while every restore
 /// ([`overwrite_nginx_file`]) refuses one, so a failed step could not be
 /// rolled back. Rejecting it here, before any mutation or certificate
 /// issuance, keeps `update` fully reversible; `spawn` is unaffected.
@@ -1603,6 +1624,29 @@ fn retry_pre_update_restore(
     pre_update_config: &str,
 ) -> Result<(), ()> {
     eprintln!("✗ A failed step left the Nginx config modified; restoring its pre-update state.");
+    restore_pre_update_config(nginx_config, pre_update_config)
+}
+
+/// Restores the pre-update config without reloading Nginx and tells the
+/// operator where that leaves the server.
+///
+/// Shared by every path that must undo an update's combined Nginx changes,
+/// so the recovery guidance stays identical.
+///
+/// # Arguments
+///
+/// * `nginx_config` - The updated site.
+/// * `pre_update_config` - The site's Nginx config before any step ran.
+///
+/// # Returns
+///
+/// * `Ok(())` - The config is back to its pre-update contents
+/// * `Err(())` - The restore failed (reported as CRITICAL, with recovery
+///   steps)
+fn restore_pre_update_config(
+    nginx_config: &nginx::config::NginxConfig,
+    pre_update_config: &str,
+) -> Result<(), ()> {
     if restore_nginx_config(nginx_config, pre_update_config).is_err() {
         eprintln!("  Nginx was not reloaded and still runs the pre-update configuration.");
         eprintln!("  Do not reload Nginx until `sudo nginx -t` passes again.");
@@ -1636,9 +1680,8 @@ fn apply_nginx_changes(
     if let Err(e) = validate_nginx_configuration() {
         eprintln!("✗ Nginx configuration validation failed after updating; not reloading.");
         eprintln!("Nginx error: \n{}", e);
-        // Already reported either way; the update fails regardless
-        let _ = restore_nginx_config(nginx_config, pre_update_config);
-        eprintln!("  Files created by the update steps (certificates, WordPress) were kept.");
+        // Reported (with recovery steps) either way; the update fails regardless
+        let _ = restore_pre_update_config(nginx_config, pre_update_config);
         return Err(());
     }
     if let Err(e) = reload_nginx() {
@@ -2613,6 +2656,30 @@ mod tests {
     /// Parses a known-good version for tests.
     fn v(s: &str) -> Option<PhpVersion> {
         PhpVersion::parse(s).ok()
+    }
+
+    /// `--wp` alone never writes the config, so it skips the regular-file check.
+    #[test]
+    fn writes_nginx_config_is_false_for_wp_only() {
+        assert!(!writes_nginx_config(false, None));
+    }
+
+    /// `--ssl` appends the HTTPS block, so it needs the check.
+    #[test]
+    fn writes_nginx_config_is_true_for_ssl() {
+        assert!(writes_nginx_config(true, None));
+    }
+
+    /// `--php` rewrites the sockets, so it needs the check.
+    #[test]
+    fn writes_nginx_config_is_true_for_php() {
+        assert!(writes_nginx_config(false, v("8.3")));
+    }
+
+    /// Both config-writing steps together still need the check.
+    #[test]
+    fn writes_nginx_config_is_true_for_ssl_and_php() {
+        assert!(writes_nginx_config(true, v("8.3")));
     }
 
     #[test]
