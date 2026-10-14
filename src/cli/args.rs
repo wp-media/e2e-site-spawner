@@ -258,7 +258,7 @@ pub fn build_cli() -> Command {
                 .arg(
                     Arg::new("ssl")
                         .long("ssl")
-                        .help("Add SSL certificate to an HTTP-only site (the HTTPS block keeps the site's PHP version)")
+                        .help("Add SSL certificate to an HTTP-only site (the HTTPS block keeps the site's PHP version; refused if it cannot be detected, unless --php is given)")
                         .action(clap::ArgAction::SetTrue),
                 )
                 .arg(

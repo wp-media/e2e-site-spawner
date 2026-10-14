@@ -36,8 +36,8 @@ use crate::nginx::{
     is_websites_config_file, reload_nginx,
 };
 use crate::nginx::{
-    append_to_nginx_file, create_nginx_file, get_list_of_sites_nginx_file_paths,
-    overwrite_nginx_file,
+    append_to_nginx_file, create_nginx_file, ensure_regular_nginx_file,
+    get_list_of_sites_nginx_file_paths, overwrite_nginx_file,
 };
 use crate::utils::db;
 use crate::utils::php::{self, PhpVersion};
@@ -900,9 +900,10 @@ pub fn activate_site(site_name: &str) {
 ///
 /// Exits early (status `0`) if nothing is requested. Otherwise it validates the
 /// site name and the current Nginx configuration, confirms the site exists and
-/// is managed by e2sp, backs up its Nginx config, resolves the PHP version the
-/// update writes (`php`, else the site's detected version, else the default
-/// with a `⚠` warning) and preflights its socket before any mutation. Then it
+/// is managed by e2sp and its config is a regular file (not a symlink), backs
+/// up its Nginx config, resolves the PHP version the update writes (`php`,
+/// else the site's detected version; `ssl` without `php` exits `1` when it
+/// cannot be detected) and preflights its socket before any mutation. Then it
 /// runs the requested steps in order PHP → WordPress → SSL:
 ///
 /// - `php` → `update_with_php` rewrites the config's socket paths (skipped when
@@ -920,14 +921,15 @@ pub fn activate_site(site_name: &str) {
 /// Afterwards, if any successful step changed the Nginx config, the combined
 /// result is validated (`nginx -t`) and Nginx is reloaded so the change takes
 /// effect — even when another step failed. If that final validation fails,
-/// the config is restored to the backup taken before any step ran, and Nginx
-/// is not reloaded.
+/// or a failed step could not restore its own change, the config is restored
+/// to the backup taken before any step ran, and Nginx is not reloaded.
 ///
 /// # Panics
 ///
 /// Never panics; exits the process with status code `1` if the site name is
 /// invalid, the Nginx configuration is invalid or unreadable, the site does
-/// not exist, it is not managed by e2sp, the needed PHP-FPM socket is missing,
+/// not exist, it is not managed by e2sp, its config is a symlink, `ssl` needs
+/// an undetectable PHP version, the needed PHP-FPM socket is missing,
 /// any requested sub-step failed, or the final Nginx validation/reload failed.
 /// Exits with `0` only when every requested step succeeded and any needed
 /// reload went through.
@@ -1000,13 +1002,36 @@ fn exit_unless_existing_managed_site(nginx_config: &nginx::config::NginxConfig) 
         );
         process::exit(1);
     }
+    exit_unless_regular_config_file(nginx_config);
+}
+
+/// Exits with a `✗` error unless the site's config is a regular file.
+///
+/// `--ssl` appends through a symlink while every restore
+/// ([`overwrite_nginx_file`]) refuses one, so a failed step could not be
+/// rolled back. Rejecting it here, before any mutation or certificate
+/// issuance, keeps `update` fully reversible; `spawn` is unaffected.
+///
+/// # Arguments
+///
+/// * `nginx_config` - The site about to be updated.
+fn exit_unless_regular_config_file(nginx_config: &nginx::config::NginxConfig) {
+    if let Err(e) = ensure_regular_nginx_file(&nginx_config.nginx_config_file_path) {
+        eprintln!(
+            "✗ Cannot update site '{}' safely: {}",
+            nginx_config.site_name, e
+        );
+        eprintln!("  Replace it with a regular file (not a symlink) and retry.");
+        process::exit(1);
+    }
 }
 
 /// Resolves the PHP version an `update` writes and preflights its socket.
 ///
-/// Prints the [`resolve_php_version`] fallback warning when `--ssl` will use
-/// it, and exits (status `1`) before any mutation when a version that will be
-/// written has no live PHP-FPM socket.
+/// Exits (status `1`) before any mutation or certificate issuance when
+/// `--ssl` needs the site's version but it cannot be detected (see
+/// [`resolve_php_version`]), or when a version that will be written has no
+/// live PHP-FPM socket.
 ///
 /// # Arguments
 ///
@@ -1023,10 +1048,10 @@ fn resolve_update_php(
     current_config: &str,
 ) -> PhpVersion {
     let detected = detect_php_version(current_config);
-    let (target, warning) = resolve_php_version(requested, &detected);
-    if let Some(warning) = warning.filter(|_| ssl) {
-        eprintln!("⚠ {}", warning);
-    }
+    let target = resolve_php_version(requested, &detected, ssl).unwrap_or_else(|e| {
+        eprintln!("✗ {}", e);
+        process::exit(1);
+    });
     if fpm_preflight_needed(requested, &detected, ssl) {
         exit_unless_fpm_available(target);
     }
@@ -1035,30 +1060,60 @@ fn resolve_update_php(
 
 /// Picks the PHP version an `update` writes (pure; no I/O).
 ///
+/// Fails closed: `--ssl` without `--php` on a site whose version cannot be
+/// detected is refused instead of guessing a default, because the HTTPS block
+/// would be appended to a live config and a real certificate issued.
+///
 /// # Arguments
 ///
 /// * `requested` - The `--php` value, if any; always wins.
 /// * `detected` - The version detected in the site's current config.
+/// * `ssl` - `--ssl` was passed, so the version is written into a new block.
 ///
 /// # Returns
 ///
-/// The version, plus a warning when neither was available and the default
-/// ([`PhpVersion::default_version`]) is used instead.
+/// The version to use. Without `--ssl` and `--php` nothing writes it, so an
+/// undetectable version resolves to [`PhpVersion::default_version`].
+///
+/// # Errors
+///
+/// The user-facing reason (see [`undetectable_php_message`]) when `--ssl`
+/// needs the detected version and detection failed.
 fn resolve_php_version(
     requested: Option<PhpVersion>,
     detected: &Result<PhpVersion, PhpFpmConfigError>,
-) -> (PhpVersion, Option<String>) {
+    ssl: bool,
+) -> Result<PhpVersion, String> {
     match (requested, detected) {
-        (Some(version), _) => (version, None),
-        (None, Ok(version)) => (*version, None),
-        (None, Err(e)) => {
-            let default = PhpVersion::default_version();
-            let warning = format!(
-                "Could not detect the site's PHP version ({e}); using the default {default}."
-            );
-            (default, Some(warning))
-        }
+        (Some(version), _) => Ok(version),
+        (None, Ok(version)) => Ok(*version),
+        (None, Err(_)) if !ssl => Ok(PhpVersion::default_version()),
+        (None, Err(e)) => Err(undetectable_php_message(e)),
     }
+}
+
+/// Explains why `--ssl` cannot pick the site's PHP version, with a remedy
+/// that actually works for that failure (pure).
+///
+/// `--php X.Y` helps only for [`PhpFpmConfigError::Inconsistent`]:
+/// `set_php_version` unifies mixed sockets, but refuses configs with no
+/// `fastcgi_pass` or a non-socket one, so those need a manual fix.
+///
+/// # Arguments
+///
+/// * `error` - Why detection failed.
+///
+/// # Returns
+///
+/// The message, without the leading `✗`.
+fn undetectable_php_message(error: &PhpFpmConfigError) -> String {
+    let hint = match error {
+        PhpFpmConfigError::Inconsistent(_) => "pass --php X.Y to choose one",
+        PhpFpmConfigError::NoFastcgiPass | PhpFpmConfigError::Unrecognized(_) => {
+            "point every fastcgi_pass at a PHP-FPM socket (unix:/var/run/php/phpX.Y-fpm.sock) by hand first; --php cannot rewrite this config"
+        }
+    };
+    format!("Cannot detect the site's PHP version ({error}); {hint}")
 }
 
 /// Whether switching the site to `target` would change its config (pure).
@@ -1221,11 +1276,13 @@ impl UpdateStep {
     ///
     /// # Returns
     ///
-    /// The step's Nginx impact on success, `Err(())` once it reported a failure.
+    /// The step's Nginx impact on success, or how it failed (already reported).
     fn run(self, nginx_config: &nginx::config::NginxConfig) -> UpdateStepOutcome {
         let changed = match self {
             Self::Php(version) => update_with_php(nginx_config, version)?,
-            Self::WordPress => update_with_wordpress(nginx_config).map(|()| true)?,
+            Self::WordPress => update_with_wordpress(nginx_config)
+                .map(|()| true)
+                .map_err(|()| StepFailure::ConfigIntact)?,
             Self::Ssl => update_with_ssl(nginx_config).map(|()| true)?,
         };
         Ok(if changed {
@@ -1236,7 +1293,8 @@ impl UpdateStep {
     }
 }
 
-/// Runs `steps` in order, skipping SSL after a failed PHP switch.
+/// Runs `steps` in order against the site, skipping SSL after a failed PHP
+/// switch (see [`fold_step_outcomes`]).
 ///
 /// # Arguments
 ///
@@ -1250,16 +1308,45 @@ fn run_update_steps(
     steps: &[UpdateStep],
     nginx_config: &nginx::config::NginxConfig,
 ) -> Vec<UpdateStepOutcome> {
+    fold_step_outcomes(
+        steps,
+        |step| step.run(nginx_config),
+        || {
+            eprintln!(
+                "✗ Skipping SSL: the PHP version switch failed, so the HTTPS block would not match."
+            );
+        },
+    )
+}
+
+/// Sequencing rule of `update`, decoupled from I/O so it is unit-testable.
+///
+/// Every step runs, even after another failed, except one
+/// [`UpdateStep::blocked_by_php_failure`]: it is not run, `on_skip` is called
+/// instead, and it counts as [`StepFailure::ConfigIntact`].
+///
+/// # Arguments
+///
+/// * `steps` - The requested steps, in execution order.
+/// * `run` - Runs one step and returns its outcome.
+/// * `on_skip` - Reports a skipped step.
+///
+/// # Returns
+///
+/// One outcome per step, in order.
+fn fold_step_outcomes(
+    steps: &[UpdateStep],
+    mut run: impl FnMut(UpdateStep) -> UpdateStepOutcome,
+    mut on_skip: impl FnMut(),
+) -> Vec<UpdateStepOutcome> {
     let mut php_failed = false;
     let mut outcomes = Vec::with_capacity(steps.len());
     for &step in steps {
         let outcome = if step.blocked_by_php_failure(php_failed) {
-            eprintln!(
-                "✗ Skipping SSL: the PHP version switch failed, so the HTTPS block would not match."
-            );
-            Err(())
+            on_skip();
+            Err(StepFailure::ConfigIntact)
         } else {
-            step.run(nginx_config)
+            run(step)
         };
         php_failed |= matches!(step, UpdateStep::Php(_)) && outcome.is_err();
         outcomes.push(outcome);
@@ -1282,27 +1369,33 @@ fn run_update_steps(
 ///
 /// * `Ok(true)` - The config was rewritten and passes `nginx -t`
 /// * `Ok(false)` - The site already uses `target`; nothing changed
-/// * `Err(())` - Reading, rewriting, writing or validating failed (already
-///   reported); the config is back to its original contents if it was written
+/// * `Err(StepFailure::ConfigIntact)` - Reading, rewriting, writing or
+///   validating failed (already reported); the config holds its original
+///   contents
+/// * `Err(StepFailure::ConfigLeftModified)` - `nginx -t` failed and the
+///   restore failed too; [`finish_update`] retries it
 fn update_with_php(
     nginx_config: &nginx::config::NginxConfig,
     target: PhpVersion,
-) -> Result<bool, ()> {
+) -> Result<bool, StepFailure> {
     let site_name = &nginx_config.site_name;
-    let original = read_nginx_config_backup(nginx_config)?;
+    let original =
+        read_nginx_config_backup(nginx_config).map_err(|()| StepFailure::ConfigIntact)?;
     if !php_switch_needed(&detect_php_version(&original), target) {
         println!("✓ Site '{site_name}' already uses PHP {target}; nothing to change");
         return Ok(false);
     }
     let rewritten = set_php_version(&original, target).map_err(|e| {
         eprintln!("✗ Cannot switch site '{site_name}' to PHP {target}: {e}");
+        StepFailure::ConfigIntact
     })?;
-    write_nginx_config(nginx_config, &rewritten)?;
+    write_nginx_config(nginx_config, &rewritten).map_err(|()| StepFailure::ConfigIntact)?;
     if let Err(e) = validate_nginx_configuration() {
         eprintln!("✗ Nginx configuration validation failed after the PHP switch: {e}");
-        // Already reported either way; the step fails regardless
-        let _ = restore_nginx_config(nginx_config, &original);
-        return Err(());
+        return Err(StepFailure::after_restore(restore_nginx_config(
+            nginx_config,
+            &original,
+        )));
     }
     println!("✓ Site '{site_name}' switched to PHP {target}");
     Ok(true)
@@ -1325,9 +1418,53 @@ fn write_nginx_config(nginx_config: &nginx::config::NginxConfig, content: &str) 
     })
 }
 
-/// Result of one `update` sub-step: the Nginx impact on success, or `Err(())`
-/// once the step has already reported its own failure.
-type UpdateStepOutcome = Result<NginxChange, ()>;
+/// How a failed `update` sub-step left the site's Nginx config. The failure
+/// itself has always been reported already.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepFailure {
+    /// The config holds what it held before the step (never written, or
+    /// restored), or the step was skipped.
+    ConfigIntact,
+    /// The step wrote the config and could not restore it; [`finish_update`]
+    /// must retry restoring the pre-update config.
+    ConfigLeftModified,
+}
+
+impl StepFailure {
+    /// Classifies a failed step from the result of its own restore attempt.
+    ///
+    /// # Arguments
+    ///
+    /// * `restored` - Result of [`restore_nginx_config`] (or a rollback built
+    ///   on it).
+    ///
+    /// # Returns
+    ///
+    /// [`StepFailure::ConfigIntact`] if the restore succeeded,
+    /// [`StepFailure::ConfigLeftModified`] otherwise.
+    fn after_restore(restored: Result<(), ()>) -> Self {
+        match restored {
+            Ok(()) => Self::ConfigIntact,
+            Err(()) => Self::ConfigLeftModified,
+        }
+    }
+}
+
+/// Result of one `update` sub-step: the Nginx impact on success, or how the
+/// step failed (already reported).
+type UpdateStepOutcome = Result<NginxChange, StepFailure>;
+
+/// What [`finish_update`] does with Nginx once every sub-step ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalNginxAction {
+    /// No step changed the config; leave Nginx alone.
+    Nothing,
+    /// Validate the combined config and reload (restoring it if invalid).
+    ApplyChanges,
+    /// A step left a broken config behind; restore the pre-update config and
+    /// do not reload (Nginx still runs the pre-update configuration).
+    RestorePreUpdate,
+}
 
 /// What [`update_site`] must do after all sub-steps ran, derived purely from
 /// their outcomes so the decision is unit-testable.
@@ -1337,6 +1474,8 @@ struct UpdateSummary {
     needs_reload: bool,
     /// At least one requested step failed.
     any_failed: bool,
+    /// A failed step left the config modified and could not restore it.
+    restore_needed: bool,
 }
 
 impl UpdateSummary {
@@ -1353,6 +1492,25 @@ impl UpdateSummary {
         Self {
             needs_reload: outcomes.contains(&Ok(NginxChange::Changed)),
             any_failed: outcomes.iter().any(Result::is_err),
+            restore_needed: outcomes.contains(&Err(StepFailure::ConfigLeftModified)),
+        }
+    }
+
+    /// Decides what [`finish_update`] does with Nginx.
+    ///
+    /// A leftover broken config wins over a pending reload: reloading would
+    /// apply a config no step vouched for.
+    ///
+    /// # Returns
+    ///
+    /// The [`FinalNginxAction`] to take.
+    fn final_action(&self) -> FinalNginxAction {
+        if self.restore_needed {
+            FinalNginxAction::RestorePreUpdate
+        } else if self.needs_reload {
+            FinalNginxAction::ApplyChanges
+        } else {
+            FinalNginxAction::Nothing
         }
     }
 
@@ -1405,10 +1563,12 @@ fn finish_update(
     pre_update_config: &str,
     summary: UpdateSummary,
 ) -> ! {
-    let nginx_applied = if summary.needs_reload {
-        apply_nginx_changes(nginx_config, pre_update_config)
-    } else {
-        Ok(())
+    let nginx_applied = match summary.final_action() {
+        FinalNginxAction::Nothing => Ok(()),
+        FinalNginxAction::ApplyChanges => apply_nginx_changes(nginx_config, pre_update_config),
+        FinalNginxAction::RestorePreUpdate => {
+            retry_pre_update_restore(nginx_config, pre_update_config)
+        }
     };
     let exit_code = summary.final_exit_code(nginx_applied);
     if exit_code == 0 {
@@ -1420,6 +1580,37 @@ fn finish_update(
         );
     }
     process::exit(exit_code);
+}
+
+/// Second chance for a step whose own restore failed: writes
+/// `pre_update_config` back without reloading.
+///
+/// This undoes every Nginx change of this update (none was reloaded, so the
+/// running Nginx already matches it); files the steps created are kept.
+///
+/// # Arguments
+///
+/// * `nginx_config` - The updated site.
+/// * `pre_update_config` - The site's Nginx config before any step ran.
+///
+/// # Returns
+///
+/// * `Ok(())` - The config is back to its pre-update contents
+/// * `Err(())` - The retry failed too (reported as CRITICAL, with recovery
+///   steps)
+fn retry_pre_update_restore(
+    nginx_config: &nginx::config::NginxConfig,
+    pre_update_config: &str,
+) -> Result<(), ()> {
+    eprintln!("✗ A failed step left the Nginx config modified; restoring its pre-update state.");
+    if restore_nginx_config(nginx_config, pre_update_config).is_err() {
+        eprintln!("  Nginx was not reloaded and still runs the pre-update configuration.");
+        eprintln!("  Do not reload Nginx until `sudo nginx -t` passes again.");
+        return Err(());
+    }
+    eprintln!("  Nginx was not reloaded; all Nginx changes of this update were undone.");
+    eprintln!("  Files created by the update steps (certificates, WordPress) were kept.");
+    Ok(())
 }
 
 /// Validates the combined Nginx configuration and reloads Nginx.
@@ -2067,8 +2258,10 @@ fn update_with_wordpress(nginx_config: &nginx::config::NginxConfig) -> Result<()
 ///
 /// * `Ok(())` - The certificate is installed and the HTTPS block appended and
 ///   validated (Nginx config changed, reload pending)
-/// * `Err(())` - SSL enablement failed and was already reported; restore was
-///   attempted, see Rollback Behavior
+/// * `Err(StepFailure::ConfigIntact)` - SSL enablement failed and was already
+///   reported; the config is unchanged or was restored, see Rollback Behavior
+/// * `Err(StepFailure::ConfigLeftModified)` - The HTTPS block could not be
+///   rolled back; [`finish_update`] retries the restore
 ///
 /// # Process Flow
 ///
@@ -2118,7 +2311,7 @@ fn update_with_wordpress(nginx_config: &nginx::config::NginxConfig) -> Result<()
 ///
 /// * [`check_if_https_in_nginx_config_file`] - Detects an existing HTTPS block
 /// * [`validate_nginx_configuration`] - Validates Nginx syntax
-fn update_with_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), ()> {
+fn update_with_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), StepFailure> {
     let site_name = &nginx_config.site_name;
 
     // Invariant: update_site builds the config with SSL enabled, so ssl_root is Some
@@ -2132,23 +2325,23 @@ fn update_with_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), ()> 
             "✗ SSL seems to already exist for site '{}'. Cannot update.",
             site_name
         );
-        return Err(());
+        return Err(StepFailure::ConfigIntact);
     }
 
     println!("Attempting to enable SSL for this site...");
 
-    issue_ssl_certificate(nginx_config, ssl_root)?;
+    issue_ssl_certificate(nginx_config, ssl_root).map_err(|()| StepFailure::ConfigIntact)?;
     hand_over_ssl_directory(ssl_root);
 
     let Ok(original_nginx_config) = read_nginx_config_backup(nginx_config) else {
         // Config untouched, so only the installed certificates need undoing
         remove_ssl_directory(ssl_root);
         print_acme_tracking_note(site_name);
-        return Err(());
+        return Err(StepFailure::ConfigIntact);
     };
     if append_https_block(nginx_config).is_err() || validate_https_block().is_err() {
-        rollback_https_update(nginx_config, ssl_root, &original_nginx_config);
-        return Err(());
+        let rolled_back = rollback_https_update(nginx_config, ssl_root, &original_nginx_config);
+        return Err(StepFailure::after_restore(rolled_back));
     }
 
     println!("✓ SSL successfully enabled for site '{}'", site_name);
@@ -2328,17 +2521,23 @@ fn restore_nginx_config(
 /// * `nginx_config` - The site whose config file is restored.
 /// * `ssl_root` - The site's SSL directory, created by this update.
 /// * `original_nginx_config` - The config contents read before the append.
+///
+/// # Returns
+///
+/// * `Ok(())` - The config was restored
+/// * `Err(())` - The restore failed (reported); the SSL directory was kept
 fn rollback_https_update(
     nginx_config: &nginx::config::NginxConfig,
     ssl_root: &str,
     original_nginx_config: &str,
-) {
+) -> Result<(), ()> {
     if restore_nginx_config(nginx_config, original_nginx_config).is_err() {
         eprintln!("  SSL files kept in '{}'.", ssl_root);
-        return;
+        return Err(());
     }
     remove_ssl_directory(ssl_root);
     print_acme_tracking_note(&nginx_config.site_name);
+    Ok(())
 }
 
 /// Tells the operator that acme.sh still tracks the site's certificate after
@@ -2552,7 +2751,9 @@ mod tests {
     }
 
     /// Shorthand for a failed sub-step outcome.
-    const FAILED: UpdateStepOutcome = Err(());
+    const FAILED: UpdateStepOutcome = Err(StepFailure::ConfigIntact);
+    /// Shorthand for a failed step that could not restore the config.
+    const LEFT_MODIFIED: UpdateStepOutcome = Err(StepFailure::ConfigLeftModified);
     /// Shorthand for a successful step that left Nginx untouched.
     const UNCHANGED: UpdateStepOutcome = Ok(NginxChange::Unchanged);
     /// Shorthand for a successful step that changed the Nginx config.
@@ -2566,6 +2767,7 @@ mod tests {
         UpdateSummary {
             needs_reload,
             any_failed,
+            restore_needed: false,
         }
     }
 
@@ -2729,35 +2931,179 @@ mod tests {
 
     #[test]
     fn test_resolve_php_version_requested_wins_over_detected() {
-        assert_eq!(
-            resolve_php_version(Some(ver("8.3")), &Ok(ver("8.1"))),
-            (ver("8.3"), None)
-        );
-        let missing = Err(PhpFpmConfigError::NoFastcgiPass);
-        assert_eq!(
-            resolve_php_version(Some(ver("8.3")), &missing),
-            (ver("8.3"), None)
-        );
+        for ssl in [false, true] {
+            assert_eq!(
+                resolve_php_version(Some(ver("8.3")), &Ok(ver("8.1")), ssl),
+                Ok(ver("8.3"))
+            );
+            let missing = Err(PhpFpmConfigError::NoFastcgiPass);
+            assert_eq!(
+                resolve_php_version(Some(ver("8.3")), &missing, ssl),
+                Ok(ver("8.3"))
+            );
+        }
     }
 
     #[test]
     fn test_resolve_php_version_uses_detected_when_not_requested() {
+        for ssl in [false, true] {
+            assert_eq!(
+                resolve_php_version(None, &Ok(ver("8.1")), ssl),
+                Ok(ver("8.1"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_php_version_without_ssl_tolerates_undetected_version() {
+        // Nothing writes the version (e.g. --wp alone), so no need to fail
+        let undetected = Err(PhpFpmConfigError::NoFastcgiPass);
         assert_eq!(
-            resolve_php_version(None, &Ok(ver("8.1"))),
-            (ver("8.1"), None)
+            resolve_php_version(None, &undetected, false),
+            Ok(PhpVersion::default_version())
         );
     }
 
     #[test]
-    fn test_resolve_php_version_falls_back_to_default_with_warning() {
-        let line = "fastcgi_pass 127.0.0.1:9000;".to_string();
-        let (version, warning) =
-            resolve_php_version(None, &Err(PhpFpmConfigError::Unrecognized(line)));
-        let default = PhpVersion::default_version();
-        assert_eq!(version, default);
-        let warning = warning.expect("fallback must warn");
-        assert!(warning.contains("127.0.0.1:9000"), "{warning}");
-        assert!(warning.contains(&format!("default {default}")), "{warning}");
+    fn test_resolve_php_version_fails_closed_for_ssl_on_every_detection_error() {
+        let errors = [
+            PhpFpmConfigError::NoFastcgiPass,
+            PhpFpmConfigError::Unrecognized("fastcgi_pass 127.0.0.1:9000;".to_string()),
+            PhpFpmConfigError::Inconsistent(vec![ver("8.1"), ver("8.5")]),
+        ];
+        for e in errors {
+            let message = resolve_php_version(None, &Err(e.clone()), true).expect_err("must fail");
+            assert!(
+                message.starts_with("Cannot detect the site's PHP version ("),
+                "{message}"
+            );
+            assert!(message.contains(&e.to_string()), "{message}");
+            assert!(!message.contains("default"), "{message}");
+        }
+    }
+
+    #[test]
+    fn test_undetectable_php_message_suggests_php_only_when_it_helps() {
+        let mixed = PhpFpmConfigError::Inconsistent(vec![ver("8.1"), ver("8.5")]);
+        assert!(undetectable_php_message(&mixed).ends_with("; pass --php X.Y to choose one"));
+        let unfixable = [
+            PhpFpmConfigError::NoFastcgiPass,
+            PhpFpmConfigError::Unrecognized("fastcgi_pass 127.0.0.1:9000;".to_string()),
+        ];
+        for e in unfixable {
+            let message = undetectable_php_message(&e);
+            assert!(!message.contains("pass --php"), "{message}");
+            assert!(
+                message.contains("--php cannot rewrite this config"),
+                "{message}"
+            );
+            assert!(
+                message.contains("127.0.0.1:9000") || matches!(e, PhpFpmConfigError::NoFastcgiPass)
+            );
+        }
+    }
+
+    /// `--php X.Y` is the advertised remedy only where `set_php_version`
+    /// accepts the config; this pins that assumption.
+    #[test]
+    fn test_set_php_version_supports_exactly_the_hinted_remedy() {
+        let sock = |v: &str| format!("fastcgi_pass unix:/var/run/php/php{v}-fpm.sock;\n");
+        let mixed = format!("{}{}", sock("8.1"), sock("8.5"));
+        assert_eq!(
+            set_php_version(&mixed, ver("8.3")),
+            Ok(format!("{}{}", sock("8.3"), sock("8.3")))
+        );
+        assert!(set_php_version("server {}\n", ver("8.3")).is_err());
+        assert!(set_php_version("fastcgi_pass 127.0.0.1:9000;\n", ver("8.3")).is_err());
+    }
+
+    /// Runs [`fold_step_outcomes`] with stubbed outcomes, returning the
+    /// outcomes, the steps actually run and the number of skips reported.
+    fn fold_with(
+        steps: &[UpdateStep],
+        stub: impl Fn(UpdateStep) -> UpdateStepOutcome,
+    ) -> (Vec<UpdateStepOutcome>, Vec<UpdateStep>, usize) {
+        let mut ran = Vec::new();
+        let mut skips = 0;
+        let outcomes = fold_step_outcomes(
+            steps,
+            |step| {
+                ran.push(step);
+                stub(step)
+            },
+            || skips += 1,
+        );
+        (outcomes, ran, skips)
+    }
+
+    #[test]
+    fn test_fold_runs_every_step_when_php_succeeds() {
+        let steps = UpdateStep::requested(true, true, Some(ver("8.3")));
+        let (outcomes, ran, skips) = fold_with(&steps, |_| CHANGED);
+        assert_eq!(outcomes, vec![CHANGED; 3]);
+        assert_eq!(ran, steps);
+        assert_eq!(skips, 0);
+    }
+
+    #[test]
+    fn test_fold_skips_ssl_but_runs_wordpress_after_php_failure() {
+        let steps = UpdateStep::requested(true, true, Some(ver("8.3")));
+        for php_failure in [FAILED, LEFT_MODIFIED] {
+            let (outcomes, ran, skips) = fold_with(&steps, |step| match step {
+                UpdateStep::Php(_) => php_failure,
+                _ => UNCHANGED,
+            });
+            assert_eq!(outcomes, vec![php_failure, UNCHANGED, FAILED]);
+            assert_eq!(
+                ran,
+                vec![UpdateStep::Php(ver("8.3")), UpdateStep::WordPress]
+            );
+            assert_eq!(skips, 1);
+        }
+    }
+
+    #[test]
+    fn test_fold_keeps_running_after_non_php_failures() {
+        let steps = UpdateStep::requested(true, true, None);
+        let (outcomes, ran, skips) = fold_with(&steps, |_| FAILED);
+        assert_eq!(outcomes, vec![FAILED, FAILED]);
+        assert_eq!(ran, steps);
+        assert_eq!(skips, 0);
+    }
+
+    #[test]
+    fn test_step_failure_after_restore() {
+        assert_eq!(
+            StepFailure::after_restore(Ok(())),
+            StepFailure::ConfigIntact
+        );
+        assert_eq!(
+            StepFailure::after_restore(Err(())),
+            StepFailure::ConfigLeftModified
+        );
+    }
+
+    #[test]
+    fn test_final_action_follows_outcomes() {
+        let action = |o: &[UpdateStepOutcome]| UpdateSummary::from_outcomes(o).final_action();
+        assert_eq!(action(&[]), FinalNginxAction::Nothing);
+        assert_eq!(action(&[UNCHANGED, FAILED]), FinalNginxAction::Nothing);
+        assert_eq!(action(&[CHANGED]), FinalNginxAction::ApplyChanges);
+        assert_eq!(action(&[FAILED, CHANGED]), FinalNginxAction::ApplyChanges);
+        assert_eq!(action(&[LEFT_MODIFIED]), FinalNginxAction::RestorePreUpdate);
+        // A broken leftover config is never reloaded, even with other changes
+        assert_eq!(
+            action(&[CHANGED, LEFT_MODIFIED]),
+            FinalNginxAction::RestorePreUpdate
+        );
+    }
+
+    #[test]
+    fn test_left_modified_step_fails_and_needs_restore() {
+        let s = UpdateSummary::from_outcomes(&[LEFT_MODIFIED, UNCHANGED]);
+        assert!(s.restore_needed && s.any_failed && !s.needs_reload);
+        assert_eq!(s.final_exit_code(Ok(())), 1);
+        assert_eq!(s.final_exit_code(Err(())), 1);
     }
 
     #[test]
@@ -2847,8 +3193,9 @@ mod tests {
             .expect("write config");
         let ssl_root = make_ssl_dir(&tmp);
 
-        rollback_https_update(&config, ssl_root.to_str().unwrap(), ORIGINAL_CONFIG);
+        let result = rollback_https_update(&config, ssl_root.to_str().unwrap(), ORIGINAL_CONFIG);
 
+        assert_eq!(result, Ok(()));
         let restored = fs::read_to_string(&config.nginx_config_file_path).expect("read config");
         assert_eq!(restored, ORIGINAL_CONFIG);
         assert!(!ssl_root.exists());
@@ -2861,8 +3208,9 @@ mod tests {
         let config = config_in(&tmp.path().join("missing-conf-dir"));
         let ssl_root = make_ssl_dir(&tmp);
 
-        rollback_https_update(&config, ssl_root.to_str().unwrap(), ORIGINAL_CONFIG);
+        let result = rollback_https_update(&config, ssl_root.to_str().unwrap(), ORIGINAL_CONFIG);
 
+        assert_eq!(result, Err(()));
         assert!(ssl_root.join("privkey.pem").exists());
         assert!(ssl_root.join("fullchain.pem").exists());
     }
