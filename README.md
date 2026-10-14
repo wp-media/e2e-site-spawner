@@ -159,23 +159,31 @@ Each requested step runs even if the other fails. If a successful step changed t
 Provides a comprehensive inventory of all configured sites on the server. The command scans `/etc/nginx/conf.d/` for configuration files and displays:
 
 - **Site name** – The domain name extracted from the config filename
-- **Features** – Indicates if SSL and/or WordPress are enabled (color-coded)
+- **Features** – Indicates if SSL and/or WordPress are enabled, and the PHP-FPM version (color-coded)
 - **Status** – Shows if the site is active or deactivated
 - **Management** – Identifies sites managed by e2sp vs. external configurations
 
-Output format:
+Output format (`<features>` is a comma-separated list in the order `ssl` (only when HTTPS is configured), `wp` (only when WordPress is installed), `php X.Y` (`php ?` if it cannot be detected)):
 
 ```text
-Sites list:
+<site> - <features> - (active|deactivated)            # managed by e2sp
+<site> - (active|deactivated) - not managed by e2sp   # any other config
+```
 
-  example.com - ssl, wp - (active)
-  test-site.com - wp - (deactivated)
-  static-site.com - (active)
+Example:
+
+```text
+Site list:
+
+  example.com - ssl, wp, php 8.5 - (active)
+  test-site.com - wp, php 8.1 - (deactivated)
+  static-site.com - php 8.5 - (active)
+  custom-site.com - php ? - (active)
   old-site.com - (active) - not managed by e2sp
 
 Summary:
-  Total sites: 4 (3 active, 1 deactivated)
-  Managed by e2sp: 3
+  Total sites: 5 (4 active, 1 deactivated)
+  Managed by e2sp: 4
   Not managed by e2sp: 1
 ```
 
@@ -184,6 +192,7 @@ Color coding:
 - Site names: bright white
 - SSL indicator: green
 - WordPress indicator: blue
+- PHP version: magenta (`php ?` in yellow)
 - Active status: green
 - Deactivated status: yellow
 - Unmanaged sites: dimmed gray
@@ -192,6 +201,7 @@ The command detects:
 
 - **SSL status** by checking for HTTPS configuration markers in the nginx config
 - **WordPress** by verifying the presence of `wp-config.php` in the site directory
+- **PHP version** from the config's `fastcgi_pass unix:/var/run/php/phpX.Y-fpm.sock;` lines; shown as `php ?` when there are none, they point elsewhere (e.g. `127.0.0.1:9000`), or they disagree. Unmanaged sites show no PHP version
 - **Active/Deactivated** based on the config file extension (`.conf` vs `.conf.deactivated`)
 - **e2sp management** by looking for specific configuration markers added by the tool
 
