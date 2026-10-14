@@ -41,7 +41,6 @@ use crate::utils::sites::{
 use crate::utils::ssl::{self, remove_site_from_acme};
 use crate::utils::validators::validate_site_name;
 use colored::*;
-use std::fs::remove_dir;
 use std::path::Path;
 use std::{fs, process};
 
@@ -895,19 +894,24 @@ pub fn activate_site(site_name: &str) {
 /// validates the site name and the current Nginx configuration, confirms the
 /// site exists and is managed by e2sp, then applies the requested changes:
 ///
-/// - `wp` → [`update_with_wordpress`] installs WordPress into the existing site
-///   (failing safely if WordPress or its database already exist).
-/// - `ssl` → [`update_with_ssl`] issues Let's Encrypt certificates and appends
+/// - `wp` → `update_with_wordpress` installs WordPress into the existing site
+///   (failing safely if WordPress or its database already exist). It does not
+///   touch the Nginx config.
+/// - `ssl` → `update_with_ssl` issues Let's Encrypt certificates and appends
 ///   the HTTPS server block, reverting the Nginx config on failure.
 ///
-/// Both may be combined; each sub-step reports its own errors and is applied
-/// independently.
+/// Both may be combined; each sub-step reports its own errors and runs even if
+/// the other failed. Afterwards, if any successful step changed the Nginx
+/// config, the configuration is validated (`nginx -t`) and Nginx is reloaded
+/// so the change takes effect — this happens even when another step failed.
 ///
 /// # Panics
 ///
-/// Exits the process with status code `1` if the site name is invalid, the
-/// Nginx configuration is invalid, the site does not exist, or it is not
-/// managed by e2sp.
+/// Never panics; exits the process with status code `1` if the site name is
+/// invalid, the Nginx configuration is invalid, the site does not exist, it is
+/// not managed by e2sp, any requested sub-step failed, or the final Nginx
+/// validation/reload failed. Exits with `0` only when every requested step
+/// succeeded.
 ///
 /// # Example
 ///
@@ -959,12 +963,130 @@ pub fn update_site(site_name: &str, wp: bool, ssl: bool) {
         process::exit(1);
     }
     println!("Preparing to update site: {}", site_name);
+    // Phase 2: Apply every requested sub-step, then reload and report once
+    let outcomes = run_update_steps(&nginx_config, wp, ssl);
+    finish_update(site_name, UpdateSummary::from_outcomes(&outcomes));
+}
+
+/// Whether a successful `update` sub-step modified the site's Nginx config.
+///
+/// Lets [`update_site`] decide if Nginx must be validated and reloaded. A new
+/// sub-step (e.g. a future PHP-version switch) only has to say which variant
+/// it produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NginxChange {
+    /// The step left the Nginx config untouched (e.g. WordPress install).
+    Unchanged,
+    /// The step rewrote the Nginx config; a reload is needed to apply it.
+    Changed,
+}
+
+/// Result of one `update` sub-step: the Nginx impact on success, or `Err(())`
+/// once the step has already reported its own failure.
+type UpdateStepOutcome = Result<NginxChange, ()>;
+
+/// What [`update_site`] must do after all sub-steps ran, derived purely from
+/// their outcomes so the decision is unit-testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UpdateSummary {
+    /// At least one successful step changed the Nginx config.
+    needs_reload: bool,
+    /// At least one requested step failed.
+    any_failed: bool,
+}
+
+impl UpdateSummary {
+    /// Summarizes sub-step outcomes.
+    ///
+    /// # Arguments
+    ///
+    /// * `outcomes` - One entry per requested sub-step, in execution order.
+    ///
+    /// # Returns
+    ///
+    /// The summary; an empty slice means nothing to reload and nothing failed.
+    fn from_outcomes(outcomes: &[UpdateStepOutcome]) -> Self {
+        Self {
+            needs_reload: outcomes.contains(&Ok(NginxChange::Changed)),
+            any_failed: outcomes.iter().any(Result::is_err),
+        }
+    }
+
+    /// Process exit code for the update.
+    ///
+    /// # Returns
+    ///
+    /// `1` if any step failed, `0` otherwise.
+    fn exit_code(&self) -> i32 {
+        i32::from(self.any_failed)
+    }
+}
+
+/// Runs each requested `update` sub-step, continuing past failures.
+///
+/// # Arguments
+///
+/// * `nginx_config` - The site being updated (built with SSL when `ssl`).
+/// * `wp` - Run the WordPress install step.
+/// * `ssl` - Run the SSL enablement step.
+///
+/// # Returns
+///
+/// One outcome per requested step, in execution order (WordPress, then SSL).
+fn run_update_steps(
+    nginx_config: &nginx::config::NginxConfig,
+    wp: bool,
+    ssl: bool,
+) -> Vec<UpdateStepOutcome> {
+    let mut outcomes = Vec::new();
     if wp {
-        update_with_wordpress(&nginx_config).unwrap_or(());
+        outcomes.push(update_with_wordpress(nginx_config).map(|()| NginxChange::Unchanged));
     }
     if ssl {
-        update_with_ssl(&nginx_config).unwrap_or(());
+        outcomes.push(update_with_ssl(nginx_config).map(|()| NginxChange::Changed));
     }
+    outcomes
+}
+
+/// Applies pending Nginx changes and exits with the update's status.
+///
+/// Reloads (after `nginx -t`) whenever a successful step changed the config,
+/// even if another step failed, so completed work is not left inactive.
+///
+/// # Arguments
+///
+/// * `site_name` - The updated site, for messages.
+/// * `summary` - The summarized sub-step outcomes.
+///
+/// # Panics
+///
+/// Never panics; always terminates the process: status `1` if validation,
+/// reload, or any sub-step failed, `0` otherwise.
+fn finish_update(site_name: &str, summary: UpdateSummary) -> ! {
+    if summary.needs_reload {
+        apply_nginx_changes();
+    }
+    if summary.any_failed {
+        eprintln!("✗ Update of site '{}' finished with errors.", site_name);
+    } else {
+        println!("✓ Site '{}' updated successfully", site_name);
+    }
+    process::exit(summary.exit_code());
+}
+
+/// Validates the Nginx configuration and reloads Nginx, exiting with status
+/// `1` on either failure.
+fn apply_nginx_changes() {
+    if let Err(e) = validate_nginx_configuration() {
+        eprintln!("✗ Nginx configuration validation failed after updating; not reloading.");
+        eprintln!("Nginx error: \n{}", e);
+        process::exit(1);
+    }
+    if let Err(e) = reload_nginx() {
+        eprintln!("✗ Failed to reload Nginx: {}", e);
+        process::exit(1);
+    }
+    println!("✓ Nginx reloaded successfully");
 }
 
 /// Lists all configured sites with their status and features.
@@ -1470,118 +1592,73 @@ fn update_with_wordpress(nginx_config: &nginx::config::NginxConfig) -> Result<()
 
 /// Adds SSL/HTTPS support to an existing HTTP-only site.
 ///
-/// This function enables SSL on a site that was initially created without HTTPS support.
-/// It generates Let's Encrypt certificates, updates the Nginx configuration to include
-/// HTTPS server blocks, and validates all changes before committing them.
+/// Issues a Let's Encrypt certificate, installs it into the site's SSL
+/// directory, and appends the HTTPS server block to the site's Nginx config.
+/// Nginx is **not** reloaded here: [`update_site`] validates and reloads once
+/// every requested sub-step has run.
 ///
 /// # Arguments
 ///
-/// * `nginx_config` - The Nginx configuration object containing site details and paths.
+/// * `nginx_config` - The site's Nginx configuration; must be built with SSL
+///   enabled so `ssl_root` is set.
 ///
 /// # Returns
 ///
-/// * `Ok(())` - SSL was successfully enabled for the site
-/// * `Err(())` - SSL enablement failed (site already has SSL, certificate generation failed, etc.)
+/// * `Ok(())` - The certificate is installed and the HTTPS block appended and
+///   validated (Nginx config changed, reload pending)
+/// * `Err(())` - SSL enablement failed; the error was already reported and the
+///   Nginx config restored from its backup where it had been touched
 ///
 /// # Process Flow
 ///
-/// 1. **Pre-flight Checks**
-///    - Verifies SSL is not already enabled (checks certificate files and config)
-///    - Backs up the current Nginx configuration for rollback
+/// 1. **Pre-flight**: refuses if certificate files or an HTTPS block already
+///    exist, then backs up the current Nginx config.
+/// 2. **Certificate**: creates `/etc/nginx/ssl/{site_name}/` (mode 750), issues
+///    and installs the certificate via [`ssl::generate_ssl`], then hands the
+///    directory to `{sudo_user}:root` (a failure here is reported, not fatal).
+/// 3. **Nginx**: appends exactly one HTTPS server block (`listen 443 ssl http2`,
+///    certificate paths, TLS 1.2/1.3 settings, the same locations and PHP-FPM
+///    handler as the HTTP block) and validates it with `nginx -t`.
 ///
-/// 2. **SSL Certificate Generation**
-///    - Creates SSL directory at `/etc/nginx/ssl/{site_name}/`
-///    - Generates Let's Encrypt certificates via acme.sh
-///    - Installs certificates in the SSL directory
-///
-/// 3. **Nginx Configuration Update**
-///    - Appends HTTPS server block to existing configuration
-///    - Adds SSL certificate paths and security headers
-///    - Configures HTTP to HTTPS redirect
-///
-/// 4. **Validation & Rollback**
-///    - Validates the updated Nginx configuration
-///    - Reverts all changes if validation fails
-///    - Preserves original configuration on any error
+/// The HTTP block is left untouched: no HTTP → HTTPS redirect and no security
+/// headers are added, so the site stays reachable on both ports.
 ///
 /// # Files Modified
 ///
 /// ```text
-/// /etc/nginx/conf.d/{site_name}.conf     # Updated with HTTPS server block
+/// /etc/nginx/conf.d/{site_name}.conf     # HTTPS server block appended
 /// /etc/nginx/ssl/{site_name}/
-/// ├── privkey.pem                        # Private key (created)
-/// └── fullchain.pem                       # Certificate chain (created)
+/// ├── privkey.pem                        # Private key (installed by acme.sh)
+/// └── fullchain.pem                      # Certificate chain (installed by acme.sh)
 /// ```
-///
-/// # Error Conditions
-///
-/// The function will fail and return `Err(())` if:
-/// - SSL files already exist in the SSL directory
-/// - HTTPS configuration already exists in the Nginx config file
-/// - Unable to read the existing Nginx configuration
-/// - SSL certificate generation fails (domain verification, rate limits, etc.)
-/// - Nginx configuration becomes invalid after updates
-/// - File system operations fail (permissions, disk space, etc.)
 ///
 /// # Rollback Behavior
 ///
-/// On failure, the function attempts to restore the original state:
-/// - Nginx configuration is reverted to the backed-up version
-/// - SSL certificates may remain (manual cleanup required)
-/// - No database or WordPress files are affected
-///
-/// # Safety Considerations
-///
-/// - The function backs up the Nginx configuration before modifications
-/// - All changes are validated before being committed
-/// - Partial updates are avoided through atomic operations where possible
-/// - SSL private keys are created with restricted permissions
-///
-/// # Example
-///
-/// ```no_run
-/// let nginx_config = NginxConfig::new(
-///     "example.com".to_string(),
-///     "/var/www/html".to_string(),
-///     "/etc/nginx/conf.d".to_string(),
-///     true,  // SSL enabled in config object
-/// );
-///
-/// match update_with_ssl(&nginx_config) {
-///     Ok(()) => println!("SSL enabled successfully"),
-///     Err(()) => eprintln!("Failed to enable SSL"),
-/// }
-/// ```
+/// - Issuance fails → the SSL directory created by this step is removed.
+/// - Append or post-append `nginx -t` fails → the Nginx config is restored from
+///   the backup, then the SSL directory is removed so a later `update --ssl`
+///   is not blocked by leftover certificate files. If the restore itself fails,
+///   the certificates are kept because the config still references them.
+/// - The certificate held in acme.sh's own state is never removed, so a retry
+///   reuses it instead of hitting Let's Encrypt rate limits; `delete` removes it.
 ///
 /// # Prerequisites
 ///
-/// - Site must exist and be accessible via HTTP
-/// - Domain must be properly configured (DNS pointing to server)
-/// - Port 80 must be accessible for Let's Encrypt validation
-/// - acme.sh must be installed and configured
-/// - User must have permissions to modify Nginx configurations
-///
-/// # Post-Success Requirements
-///
-/// After successful SSL enablement:
-/// - Nginx reload is required (handled by caller)
-/// - Site will be accessible via HTTPS on port 443
-/// - HTTP traffic will redirect to HTTPS
-/// - SSL certificates will auto-renew via acme.sh cron job
+/// - DNS for the domain points to this server and port 80 is reachable
+///   (HTTP-01 challenge)
+/// - acme.sh is installed for root (see [`ssl::generate_ssl`])
 ///
 /// # See Also
 ///
-/// * [`ssl::generate_ssl`] - Core SSL certificate generation logic
-/// * [`check_if_https_in_nginx_config_file`] - Checks for existing HTTPS config
+/// * [`check_if_https_in_nginx_config_file`] - Detects an existing HTTPS block
 /// * [`validate_nginx_configuration`] - Validates Nginx syntax
 fn update_with_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), ()> {
     let site_name = &nginx_config.site_name;
 
-    // Pre-flight check: Verify SSL is not already enabled
-    // Safe to call unwrap here as ssl_root is Some when ssl is true in the config
+    // Invariant: update_site builds the config with SSL enabled, so ssl_root is Some
     let ssl_root = nginx_config.ssl_root.as_ref().unwrap();
 
-    // Check both certificate files and nginx config for existing SSL
+    // Either certificate files or an HTTPS block mean SSL was (partially) set up
     if ssl::check_if_ssl_files_exist(ssl_root)
         || check_if_https_in_nginx_config_file(&nginx_config.nginx_config_file_path)
     {
@@ -1594,115 +1671,270 @@ fn update_with_ssl(nginx_config: &nginx::config::NginxConfig) -> Result<(), ()> 
 
     println!("Attempting to enable SSL for this site...");
 
-    // Backup current nginx configuration for potential rollback
-    let original_nginx_config_file_content =
-        match fs::read_to_string(&nginx_config.nginx_config_file_path) {
-            Ok(content) => content,
-            Err(e) => {
-                eprintln!(
-                    "✗ Failed to read existing Nginx configuration file for site '{}': {}",
-                    site_name, e
-                );
-                eprintln!("  Cannot proceed with SSL update without backup.");
-                return Err(());
-            }
-        };
+    let original_nginx_config = read_nginx_config_backup(nginx_config)?;
+    issue_ssl_certificate(nginx_config, ssl_root)?;
+    hand_over_ssl_directory(ssl_root);
 
-    // Create SSL directory
-    match sites::create_directory_if_not_exists(ssl_root, Some(0o750)) {
-        Ok(()) => {
-            println!("✓ SSL directory created successfully");
-        }
-        Err(e) => {
-            eprintln!("✗ Failed to create SSL directory: {}", e);
-            return Err(());
-        }
-    }
-
-    // Generate SSL certificates via Let's Encrypt
-    match ssl::generate_ssl(nginx_config) {
-        Ok(()) => {
-            println!("✓ SSL certificates generated and installed successfully");
-            let https_config = nginx_config.generate_config(nginx::config::NginxProtocol::Https);
-            match append_to_nginx_file(&nginx_config.nginx_config_file_path, &https_config) {
-                Ok(()) => {
-                    println!("✓ Nginx configuration file updated for HTTPS successfully");
-                }
-                Err(e) => {
-                    eprintln!(
-                        "✗ Failed to update Nginx configuration file for HTTPS: {}",
-                        e
-                    );
-                    remove_dir(ssl_root).unwrap_or(());
-                    return Err(());
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("✗ SSL generation failed: {}", e);
-            remove_dir(ssl_root).unwrap_or(());
-            return Err(());
-        }
-    }
-
-    let current_user = get_sudo_user();
-    sites::set_path_owner_recursive(Some(&current_user), Some("root"), ssl_root).unwrap_or(());
-
-    // Generate HTTPS server block configuration
-    let https_config = nginx_config.generate_config(nginx::config::NginxProtocol::Https);
-
-    // Append HTTPS configuration to existing nginx config file
-    match append_to_nginx_file(&nginx_config.nginx_config_file_path, &https_config) {
-        Ok(()) => {
-            println!("✓ Nginx configuration file updated for HTTPS successfully");
-        }
-        Err(e) => {
-            eprintln!(
-                "✗ Failed to update Nginx configuration file for HTTPS: {}",
-                e
-            );
-
-            // Attempt to revert to original configuration
-            println!("Attempting to revert Nginx configuration...");
-            if let Err(err) = fs::write(
-                &nginx_config.nginx_config_file_path,
-                &original_nginx_config_file_content,
-            ) {
-                eprintln!(
-                    "✗ CRITICAL: Failed to revert Nginx configuration file: {}",
-                    err
-                );
-                eprintln!("  Manual intervention may be required to restore the configuration.");
-            }
-            return Err(());
-        }
-    }
-
-    // Validate the updated nginx configuration
-    if let Err(e) = validate_nginx_configuration() {
-        eprintln!(
-            "✗ Nginx configuration validation failed after SSL update: {}",
-            e
-        );
-        println!("Attempting to revert Nginx configuration...");
-
-        // Revert to backed up configuration
-        if let Err(err) = fs::write(
-            &nginx_config.nginx_config_file_path,
-            original_nginx_config_file_content,
-        ) {
-            eprintln!(
-                "✗ CRITICAL: Failed to revert Nginx configuration file: {}",
-                err
-            );
-            eprintln!("  The Nginx configuration may be in an invalid state.");
-            eprintln!("  Manual intervention required to fix the configuration.");
-        } else {
-            println!("✓ Successfully reverted Nginx configuration to original state");
-        }
+    if append_and_validate_https_block(nginx_config).is_err() {
+        rollback_https_update(nginx_config, ssl_root, &original_nginx_config);
         return Err(());
     }
 
     println!("✓ SSL successfully enabled for site '{}'", site_name);
     Ok(())
+}
+
+/// Reads the site's current Nginx config so `update_with_ssl` can restore it.
+///
+/// # Arguments
+///
+/// * `nginx_config` - The site whose config file is backed up.
+///
+/// # Returns
+///
+/// * `Ok(String)` - The file's current contents
+/// * `Err(())` - The file could not be read (already reported)
+fn read_nginx_config_backup(nginx_config: &nginx::config::NginxConfig) -> Result<String, ()> {
+    fs::read_to_string(&nginx_config.nginx_config_file_path).map_err(|e| {
+        eprintln!(
+            "✗ Failed to read existing Nginx configuration file for site '{}': {}",
+            nginx_config.site_name, e
+        );
+        eprintln!("  Cannot proceed with SSL update without backup.");
+    })
+}
+
+/// Creates the SSL directory and issues + installs the certificate into it.
+///
+/// On issuance failure the directory is removed again. It is always new here
+/// because [`sites::create_directory_if_not_exists`] refuses an existing one,
+/// so the recursive removal cannot delete anything this step did not create.
+///
+/// # Arguments
+///
+/// * `nginx_config` - The site to issue the certificate for.
+/// * `ssl_root` - The site's SSL directory (`/etc/nginx/ssl/{site_name}`).
+///
+/// # Returns
+///
+/// * `Ok(())` - `privkey.pem` and `fullchain.pem` are installed in `ssl_root`
+/// * `Err(())` - Directory creation or issuance failed (already reported)
+fn issue_ssl_certificate(
+    nginx_config: &nginx::config::NginxConfig,
+    ssl_root: &str,
+) -> Result<(), ()> {
+    if let Err(e) = sites::create_directory_if_not_exists(ssl_root, Some(0o750)) {
+        eprintln!("✗ Failed to create SSL directory: {}", e);
+        return Err(());
+    }
+    println!("✓ SSL directory created successfully");
+
+    if let Err(e) = ssl::generate_ssl(nginx_config) {
+        eprintln!("✗ SSL generation failed: {}", e);
+        remove_ssl_directory(ssl_root);
+        return Err(());
+    }
+    println!("✓ SSL certificates generated and installed successfully");
+    Ok(())
+}
+
+/// Hands the SSL directory to `{sudo_user}:root`, matching what `spawn` does.
+///
+/// Failure is reported but not fatal: Nginx's master process runs as root and
+/// can still read the certificates, so HTTPS works either way.
+///
+/// # Arguments
+///
+/// * `ssl_root` - The site's SSL directory.
+fn hand_over_ssl_directory(ssl_root: &str) {
+    let current_user = get_sudo_user();
+    if let Err(e) = sites::set_path_owner_recursive(Some(&current_user), Some("root"), ssl_root) {
+        eprintln!("✗ Failed to set SSL directory ownership: {}", e);
+        eprintln!(
+            "  HTTPS still works; fix it with: sudo chown -R {}:root {}",
+            current_user, ssl_root
+        );
+    }
+}
+
+/// Appends the HTTPS server block once and checks the result with `nginx -t`.
+///
+/// # Arguments
+///
+/// * `nginx_config` - The site whose config file receives the HTTPS block.
+///
+/// # Returns
+///
+/// * `Ok(())` - The block was appended and Nginx accepts the configuration
+/// * `Err(())` - Appending or validation failed (already reported); the caller
+///   must restore the backup
+fn append_and_validate_https_block(nginx_config: &nginx::config::NginxConfig) -> Result<(), ()> {
+    let https_config = nginx_config.generate_config(nginx::config::NginxProtocol::Https);
+    if let Err(e) = append_to_nginx_file(&nginx_config.nginx_config_file_path, &https_config) {
+        eprintln!(
+            "✗ Failed to update Nginx configuration file for HTTPS: {}",
+            e
+        );
+        return Err(());
+    }
+    println!("✓ Nginx configuration file updated for HTTPS successfully");
+
+    validate_nginx_configuration().map_err(|e| {
+        eprintln!(
+            "✗ Nginx configuration validation failed after SSL update: {}",
+            e
+        );
+    })
+}
+
+/// Undoes a failed HTTPS append: restores the Nginx config, then drops the
+/// installed certificates.
+///
+/// The SSL directory is removed only once the config no longer references it;
+/// if the restore fails the certificates are kept so the half-written config
+/// is not made worse by pointing at missing files.
+///
+/// # Arguments
+///
+/// * `nginx_config` - The site whose config file is restored.
+/// * `ssl_root` - The site's SSL directory, created by this update.
+/// * `original_nginx_config` - The config contents read before any change.
+fn rollback_https_update(
+    nginx_config: &nginx::config::NginxConfig,
+    ssl_root: &str,
+    original_nginx_config: &str,
+) {
+    println!("Attempting to revert Nginx configuration...");
+    if let Err(e) = fs::write(&nginx_config.nginx_config_file_path, original_nginx_config) {
+        eprintln!(
+            "✗ CRITICAL: Failed to revert Nginx configuration file: {}",
+            e
+        );
+        eprintln!("  The Nginx configuration may be in an invalid state.");
+        eprintln!(
+            "  Manual intervention required to fix '{}'; SSL files kept in '{}'.",
+            nginx_config.nginx_config_file_path, ssl_root
+        );
+        return;
+    }
+    println!("✓ Successfully reverted Nginx configuration to original state");
+    remove_ssl_directory(ssl_root);
+}
+
+/// Removes the SSL directory created by `update_with_ssl`, reporting failures.
+///
+/// Uses [`sites::remove_directory`] (recursive) because after installation the
+/// directory holds the certificate files, which `std::fs::remove_dir` would
+/// refuse to delete. acme.sh's own certificate state is left intact.
+///
+/// # Arguments
+///
+/// * `ssl_root` - The site's SSL directory.
+fn remove_ssl_directory(ssl_root: &str) {
+    match sites::remove_directory(ssl_root) {
+        Ok(()) => println!("✓ SSL directory '{}' removed", ssl_root),
+        Err(e) => {
+            eprintln!("✗ Failed to remove SSL directory: {}", e);
+            eprintln!("  Remove it manually before retrying `update --ssl`.");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Shorthand for a failed sub-step outcome.
+    const FAILED: UpdateStepOutcome = Err(());
+    /// Shorthand for a successful step that left Nginx untouched.
+    const UNCHANGED: UpdateStepOutcome = Ok(NginxChange::Unchanged);
+    /// Shorthand for a successful step that changed the Nginx config.
+    const CHANGED: UpdateStepOutcome = Ok(NginxChange::Changed);
+
+    /// Builds the expected summary for terse assertions.
+    fn summary(needs_reload: bool, any_failed: bool) -> UpdateSummary {
+        UpdateSummary {
+            needs_reload,
+            any_failed,
+        }
+    }
+
+    #[test]
+    fn summary_of_no_steps_needs_nothing_and_succeeds() {
+        let s = UpdateSummary::from_outcomes(&[]);
+        assert_eq!(s, summary(false, false));
+        assert_eq!(s.exit_code(), 0);
+    }
+
+    #[test]
+    fn successful_wordpress_step_alone_does_not_reload() {
+        let s = UpdateSummary::from_outcomes(&[UNCHANGED]);
+        assert_eq!(s, summary(false, false));
+        assert_eq!(s.exit_code(), 0);
+    }
+
+    #[test]
+    fn successful_ssl_step_triggers_reload_and_succeeds() {
+        let s = UpdateSummary::from_outcomes(&[CHANGED]);
+        assert_eq!(s, summary(true, false));
+        assert_eq!(s.exit_code(), 0);
+    }
+
+    #[test]
+    fn both_steps_succeeding_reload_and_succeed() {
+        let s = UpdateSummary::from_outcomes(&[UNCHANGED, CHANGED]);
+        assert_eq!(s, summary(true, false));
+        assert_eq!(s.exit_code(), 0);
+    }
+
+    #[test]
+    fn failed_ssl_step_does_not_reload_and_fails() {
+        let s = UpdateSummary::from_outcomes(&[FAILED]);
+        assert_eq!(s, summary(false, true));
+        assert_eq!(s.exit_code(), 1);
+    }
+
+    #[test]
+    fn failed_wordpress_step_still_reloads_successful_ssl_change_but_fails() {
+        let s = UpdateSummary::from_outcomes(&[FAILED, CHANGED]);
+        assert_eq!(s, summary(true, true));
+        assert_eq!(s.exit_code(), 1);
+    }
+
+    #[test]
+    fn failed_ssl_after_successful_wordpress_fails_without_reload() {
+        let s = UpdateSummary::from_outcomes(&[UNCHANGED, FAILED]);
+        assert_eq!(s, summary(false, true));
+        assert_eq!(s.exit_code(), 1);
+    }
+
+    #[test]
+    fn all_steps_failing_fails_without_reload() {
+        let s = UpdateSummary::from_outcomes(&[FAILED, FAILED]);
+        assert_eq!(s, summary(false, true));
+        assert_eq!(s.exit_code(), 1);
+    }
+
+    #[test]
+    fn remove_ssl_directory_deletes_non_empty_directory() {
+        let tmp = tempfile::TempDir::new().expect("create temp dir");
+        let ssl_root = tmp.path().join("ssl");
+        fs::create_dir(&ssl_root).expect("create ssl dir");
+        fs::write(ssl_root.join("privkey.pem"), "key").expect("write key");
+        fs::write(ssl_root.join("fullchain.pem"), "cert").expect("write cert");
+
+        remove_ssl_directory(ssl_root.to_str().expect("utf-8 path"));
+
+        assert!(!ssl_root.exists());
+    }
+
+    #[test]
+    fn remove_ssl_directory_tolerates_missing_directory() {
+        let tmp = tempfile::TempDir::new().expect("create temp dir");
+        let ssl_root = tmp.path().join("missing");
+
+        remove_ssl_directory(ssl_root.to_str().expect("utf-8 path"));
+
+        assert!(!ssl_root.exists());
+    }
 }
