@@ -269,6 +269,7 @@ pub fn build_cli() -> Command {
                     • Status (active/inactive)\n    \
                     • SSL enabled (yes/no)\n    \
                     • WordPress installed (yes/no)\n    \
+                    • PHP-FPM version (php X.Y, or php ? if it cannot be detected)\n    \
                     • Site path\n\n\
                     NOTES:\n    \
                     Sites are detected by scanning Nginx configuration files in /etc/nginx/conf.d/")

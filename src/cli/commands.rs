@@ -1231,6 +1231,82 @@ fn apply_nginx_changes(
     Ok(())
 }
 
+/// Labels shown for a site feature in `list` output.
+///
+/// Kept separate from colouring so the formatting is unit-testable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SiteFeature {
+    /// HTTPS is configured.
+    Ssl,
+    /// WordPress is installed (`wp-config.php` exists).
+    WordPress,
+    /// The PHP-FPM version the config passes to, or `None` when it could not
+    /// be detected (no, unrecognized or inconsistent `fastcgi_pass` lines).
+    Php(Option<PhpVersion>),
+}
+
+impl SiteFeature {
+    /// Returns the plain-text label, e.g. `ssl`, `wp`, `php 8.5` or `php ?`.
+    fn label(&self) -> String {
+        match self {
+            SiteFeature::Ssl => "ssl".to_string(),
+            SiteFeature::WordPress => "wp".to_string(),
+            SiteFeature::Php(Some(v)) => format!("php {}", v),
+            SiteFeature::Php(None) => "php ?".to_string(),
+        }
+    }
+}
+
+/// Builds the ordered feature list of a managed site: `ssl`, `wp`, then PHP.
+///
+/// PHP is always included because every managed config has `fastcgi_pass`;
+/// a failed detection is shown as `php ?` rather than hidden.
+///
+/// # Arguments
+///
+/// * `has_ssl` - Whether HTTPS is configured.
+/// * `has_wordpress` - Whether WordPress is installed.
+/// * `php_version` - Detected PHP-FPM version, `None` if detection failed.
+///
+/// # Returns
+///
+/// The features in display order.
+fn format_site_features(
+    has_ssl: bool,
+    has_wordpress: bool,
+    php_version: Option<PhpVersion>,
+) -> Vec<SiteFeature> {
+    let mut features = Vec::with_capacity(3);
+    if has_ssl {
+        features.push(SiteFeature::Ssl);
+    }
+    if has_wordpress {
+        features.push(SiteFeature::WordPress);
+    }
+    features.push(SiteFeature::Php(php_version));
+    features
+}
+
+/// Colours a feature label for terminal output (ssl green, wp blue, php
+/// magenta, undetected php yellow).
+///
+/// # Arguments
+///
+/// * `feature` - The feature to render.
+///
+/// # Returns
+///
+/// The coloured label.
+fn colorize_feature(feature: &SiteFeature) -> String {
+    let label = feature.label();
+    match feature {
+        SiteFeature::Ssl => label.green().to_string(),
+        SiteFeature::WordPress => label.blue().to_string(),
+        SiteFeature::Php(Some(_)) => label.magenta().to_string(),
+        SiteFeature::Php(None) => label.yellow().to_string(),
+    }
+}
+
 /// Lists all configured sites with their status and features.
 ///
 /// This function scans the Nginx configuration directory and displays information
@@ -1238,6 +1314,7 @@ fn apply_nginx_changes(
 /// - Whether it's managed by e2sp
 /// - SSL status (if HTTPS is configured)
 /// - WordPress status (if wp-config.php exists)
+/// - PHP-FPM version (`php X.Y`, or `php ?` if it cannot be detected)
 /// - Active/Deactivated status based on file extension
 ///
 /// The output is color-coded for better readability.
@@ -1273,6 +1350,7 @@ pub fn list_sites() {
         is_managed: bool,
         has_ssl: bool,
         has_wordpress: bool,
+        php_version: Option<PhpVersion>,
         is_active: bool,
     }
 
@@ -1322,6 +1400,7 @@ pub fn list_sites() {
                 is_managed,
                 has_ssl: false,
                 has_wordpress: false,
+                php_version: None,
                 is_active,
             });
             continue;
@@ -1333,12 +1412,15 @@ pub fn list_sites() {
         let wp_config_path = format!("{}/{}/wp-config.php", SITES_PATH, base);
         // Check for WordPress by looking for wp-config.php in site root
         let has_wordpress = Path::new(&wp_config_path).exists();
+        // Any detection failure (hand-edited, missing or mixed sockets) shows as `php ?`
+        let php_version = nginx::php_fpm::detect_php_version(&content).ok();
 
         sites.push(SiteInfo {
             name: base,
             is_managed,
             has_ssl,
             has_wordpress,
+            php_version,
             is_active,
         });
     }
@@ -1372,44 +1454,23 @@ pub fn list_sites() {
                 "not managed by e2sp".dimmed()
             );
         } else {
-            // Build features list
-            let mut features = Vec::new();
-            if site.has_ssl {
-                features.push("ssl");
-            }
-            if site.has_wordpress {
-                features.push("wp");
-            }
-
-            // Format the line based on what features exist
             let status = if site.is_active {
                 "(active)".green()
             } else {
                 "(deactivated)".yellow()
             };
-
-            if features.is_empty() {
-                // No features, just show name and status
-                println!("  {} - {}", site.name.bright_white(), status);
-            } else {
-                // Show features
-                let features_str = features
+            let features_str =
+                format_site_features(site.has_ssl, site.has_wordpress, site.php_version)
                     .iter()
-                    .map(|f| match *f {
-                        "ssl" => "ssl".green().to_string(),
-                        "wp" => "wp".blue().to_string(),
-                        _ => f.to_string(),
-                    })
+                    .map(colorize_feature)
                     .collect::<Vec<_>>()
                     .join(", ");
-
-                println!(
-                    "  {} - {} - {}",
-                    site.name.bright_white(),
-                    features_str,
-                    status
-                );
-            }
+            println!(
+                "  {} - {} - {}",
+                site.name.bright_white(),
+                features_str,
+                status
+            );
         }
     }
 
@@ -2083,6 +2144,87 @@ fn remove_ssl_directory(ssl_root: &str) -> SslDirCleanup {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Renders features as plain labels for assertions.
+    fn labels(features: &[SiteFeature]) -> Vec<String> {
+        features.iter().map(SiteFeature::label).collect()
+    }
+
+    /// Parses a known-good version for tests.
+    fn v(s: &str) -> Option<PhpVersion> {
+        PhpVersion::parse(s).ok()
+    }
+
+    #[test]
+    fn features_php_only() {
+        assert_eq!(
+            labels(&format_site_features(false, false, v("8.5"))),
+            ["php 8.5"]
+        );
+    }
+
+    #[test]
+    fn features_ssl_and_php() {
+        assert_eq!(
+            labels(&format_site_features(true, false, v("8.1"))),
+            ["ssl", "php 8.1"]
+        );
+    }
+
+    #[test]
+    fn features_wp_and_php() {
+        assert_eq!(
+            labels(&format_site_features(false, true, v("7.4"))),
+            ["wp", "php 7.4"]
+        );
+    }
+
+    #[test]
+    fn features_all_in_order() {
+        assert_eq!(
+            labels(&format_site_features(true, true, v("10.0"))),
+            ["ssl", "wp", "php 10.0"]
+        );
+    }
+
+    #[test]
+    fn features_undetected_php_shows_question_mark() {
+        assert_eq!(labels(&format_site_features(false, false, None)), ["php ?"]);
+        assert_eq!(
+            labels(&format_site_features(true, true, None)),
+            ["ssl", "wp", "php ?"]
+        );
+    }
+
+    #[test]
+    fn colorized_feature_keeps_label_text() {
+        for f in format_site_features(true, true, v("8.3"))
+            .iter()
+            .chain(format_site_features(false, false, None).iter())
+        {
+            assert!(colorize_feature(f).contains(&f.label()));
+        }
+    }
+
+    #[test]
+    fn detection_failures_map_to_unknown_php() {
+        // Mirrors list_sites: every detection error must become `php ?`, never a panic
+        let cases = [
+            "server {}\n",
+            "fastcgi_pass 127.0.0.1:9000;\n",
+            "fastcgi_pass unix:/var/run/php/php8.1-fpm.sock;\nfastcgi_pass unix:/var/run/php/php8.5-fpm.sock;\n",
+            "fastcgi_pass unix:/var/run/php/php8.x-fpm.sock;\n",
+        ];
+        for c in cases {
+            let php = nginx::php_fpm::detect_php_version(c).ok();
+            assert_eq!(labels(&format_site_features(false, false, php)), ["php ?"]);
+        }
+        let ok = nginx::php_fpm::detect_php_version(
+            "  fastcgi_pass unix:/var/run/php/php8.4-fpm.sock;\n",
+        )
+        .ok();
+        assert_eq!(labels(&format_site_features(false, false, ok)), ["php 8.4"]);
+    }
 
     #[test]
     fn test_build_spawn_config_carries_chosen_php_version() {
