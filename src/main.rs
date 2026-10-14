@@ -48,7 +48,7 @@ use std::process;
 /// - `delete` - Removes a site and all associated resources
 /// - `deactivate` - Disables a site without removing files
 /// - `activate` - Re-enables a previously deactivated site
-/// - `update` - Adds WordPress and/or SSL to an existing site
+/// - `update` - Switches the PHP-FPM version, adds WordPress and/or SSL to an existing site
 /// - `list` - Lists all configured sites and their status
 ///
 /// # Exit Codes
@@ -98,7 +98,8 @@ fn main() {
         if ssl {
             require_acme_sh();
         }
-        update_site(site_name, wp, ssl);
+        let php = matches.get_one::<PhpVersion>("php").copied();
+        update_site(site_name, wp, ssl, php);
     } else if matches.subcommand_matches("list").is_some() {
         require_elevated_privileges();
 

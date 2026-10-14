@@ -22,7 +22,7 @@ CLI for provisioning and managing WordPress or static sites on the QA LNMP serve
 ### System requirements
 
 - Linux host with nginx, PHP-FPM, and systemd (the tool reloads nginx via `systemctl`).
-- PHP-FPM: 8.5 is the default version (socket `/var/run/php/php8.5-fpm.sock`); any installed `X.Y` can be chosen with `spawn --php X.Y` (socket `/var/run/php/phpX.Y-fpm.sock`). Static (`--no-wp`) sites need it too, because every generated config contains `fastcgi_pass`. `spawn` and `update --ssl` check the socket before changing anything and refuse to run (exit 1, listing the installed PHP-FPM versions) when it is missing; a socket only exists while that PHP-FPM version is installed **and running**.
+- PHP-FPM: 8.5 is the default version (socket `/var/run/php/php8.5-fpm.sock`); any installed `X.Y` can be chosen with `spawn --php X.Y` or switched later with `update --php X.Y` (socket `/var/run/php/phpX.Y-fpm.sock`). Static (`--no-wp`) sites need it too, because every generated config contains `fastcgi_pass`. `spawn`, `update --php` and `update --ssl` check the socket of the version they write before changing anything and refuse to run (exit 1, listing the installed PHP-FPM versions) when it is missing; a socket only exists while that PHP-FPM version is installed **and running**.
 - Root or sudo privileges. All commands exit early if they are not executed by root.
 - `curl` and `tar` for downloading and unpacking WordPress.
 - `mysql`/`mariadb` server reachable at `localhost` (host constant can be changed) with a root account that can create databases and grant privileges.
@@ -116,7 +116,7 @@ sudo e2sp --help
 | `delete <site>` | Removes nginx configs, site files, SSL certificates, and the MySQL database. |
 | `deactivate <site>` | Renames the nginx config to `.conf.deactivated` to take the site offline without deleting assets. |
 | `activate <site>` | Reverts the `.deactivated` config back to `.conf` and reloads nginx. |
-| `update <site> [--wp] [--ssl]` | Adds WordPress to a static site and/or enables SSL on an existing HTTP-only deployment. |
+| `update <site> [--wp] [--ssl] [--php X.Y]` | Switches an existing site's PHP-FPM version, adds WordPress to a static site and/or enables SSL on an HTTP-only deployment. `--php` has no default (omitted = keep the current version). |
 | `list` | Displays all configured sites with their status, features, and management information. |
 
 Use `e2sp <command> --help` for command-specific usage text and examples.
@@ -150,9 +150,10 @@ Toggle site availability by renaming the nginx configuration (`example.conf` ↔
 Extends an existing site in-place:
 
 - `--wp` – installs WordPress into an existing static site after ensuring no previous installation or database exists.
-- `--ssl` – generates certificates, backs up the nginx config, appends the HTTPS block, validates nginx, and reverts on failure (restoring the config and removing the new SSL directory). acme.sh still tracks the certificate: re-run `update --ssl` to reuse it, or `e2sp delete` / `acme.sh --remove -d <site>` to stop renewals.
+- `--php X.Y` – rewrites every `fastcgi_pass` socket in the site's config to `/var/run/php/phpX.Y-fpm.sock` (atomic write, symlinks refused), validates nginx, and restores the original file on failure. Does nothing if the site already uses `X.Y`. Refuses hand-edited configs whose `fastcgi_pass` is not a managed socket (e.g. `127.0.0.1:9000`). Exits 1 before changing anything if the socket is missing.
+- `--ssl` – generates certificates, backs up the nginx config, appends the HTTPS block, validates nginx, and reverts on failure (restoring the config and removing the new SSL directory). The HTTPS block uses the site's current PHP version (or the `--php` target), so both blocks always match; if the version cannot be detected, the default `8.5` is used with a `⚠` warning. acme.sh still tracks the certificate: re-run `update --ssl` to reuse it, or `e2sp delete` / `acme.sh --remove -d <site>` to stop renewals.
 
-Each requested step runs even if the other fails. If a successful step changed the nginx config, the combined result is validated and nginx is reloaded so the change takes effect; if that final validation fails, the config is restored to its pre-update state. The command exits with status `1` if any requested step, the validation, or the reload failed.
+Steps run in the order `--php` → `--wp` → `--ssl`, each even if another failed — except `--ssl`, which is skipped (and counted as failed) when `--php` failed, because its HTTPS block would not match the HTTP block. If a successful step changed the nginx config, the combined result is validated and nginx is reloaded so the change takes effect; if that final validation fails, the config is restored to its pre-update state. The command exits with status `1` if any requested step, the validation, or the reload failed.
 
 #### `list`
 
@@ -218,7 +219,7 @@ sudo e2sp list
 | Site root | `/var/www/html/<site>` | chmod `0777` for compatibility with existing workflows. Owned by `www-data:www-data`, applied recursively once every file has been written. |
 | Uploads directory | `/var/www/html/<site>/wp-content/uploads` | WordPress does not ship this directory, so it is created up front (`0777`, `www-data:www-data`). WordPress sites only. |
 | Nginx config | `/etc/nginx/conf.d/<site>.conf` | HTTP block is always present; HTTPS block is appended when SSL is enabled. |
-| PHP-FPM socket | `/var/run/php/php<X.Y>-fpm.sock` | Referenced by every `fastcgi_pass` in the site config (HTTP and HTTPS). `X.Y` is `--php` (default `8.5`); the socket must exist before spawning. |
+| PHP-FPM socket | `/var/run/php/php<X.Y>-fpm.sock` | Referenced by every `fastcgi_pass` in the site config (HTTP and HTTPS). `X.Y` is `--php` (default `8.5`); the socket must exist before spawning. `update --php X.Y` switches it later. |
 | SSL material | `/etc/nginx/ssl/<site>/` | Contains `privkey.pem` and `fullchain.pem`. Created only when SSL is requested. |
 | Database | `wp_<site>` | Created through the MySQL root account and granted to the `wordpress` user with password `pleaseadvise` (see `src/constants.rs`). |
 
