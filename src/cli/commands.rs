@@ -34,6 +34,7 @@ use crate::nginx::{
 };
 use crate::nginx::{append_to_nginx_file, create_nginx_file, get_list_of_sites_nginx_file_paths};
 use crate::utils::db;
+use crate::utils::php;
 use crate::utils::sites::{
     self, check_if_site_exists, create_file_with_content_if_not_exists, get_sudo_user,
     put_wordpress_in_site_directory, revert_site_spawn,
@@ -292,6 +293,7 @@ pub fn spawn_site(site_name: &str, ssl: bool, no_wp: bool) {
         eprintln!("✗ Validation failed: {}", e);
         process::exit(1);
     });
+    exit_unless_fpm_available(&nginx_config);
 
     if ssl {
         ssl::print_ssl_warning(site_name);
@@ -965,6 +967,9 @@ pub fn update_site(site_name: &str, wp: bool, ssl: bool) {
         );
         process::exit(1);
     }
+    if ssl {
+        exit_unless_fpm_available(&nginx_config);
+    }
     // Taken before any step runs, so the final gate can undo the combined result
     let pre_update_config =
         read_nginx_config_backup(&nginx_config).unwrap_or_else(|()| process::exit(1));
@@ -976,6 +981,23 @@ pub fn update_site(site_name: &str, wp: bool, ssl: bool) {
         .collect();
     let summary = UpdateSummary::from_outcomes(&outcomes);
     finish_update(&nginx_config, &pre_update_config, summary);
+}
+
+/// Exits with a `✗` error unless the PHP-FPM socket `nginx_config` targets is live.
+///
+/// Preflight for `spawn` and `update --ssl`, called before any mutation so a
+/// config is never written for a missing socket (`nginx -t` passes, but PHP
+/// returns 502). The message logic lives in
+/// [`crate::utils::php::ensure_fpm_available`] so `--php` (P3/P4) reuses it.
+///
+/// # Arguments
+///
+/// * `nginx_config` - Config whose `php_version` will be written.
+fn exit_unless_fpm_available(nginx_config: &nginx::config::NginxConfig) {
+    if let Err(e) = php::ensure_fpm_available(nginx_config.php_version) {
+        eprintln!("✗ {}", e);
+        process::exit(1);
+    }
 }
 
 /// Whether a successful `update` sub-step modified the site's Nginx config.

@@ -256,6 +256,76 @@ fn version_from_socket_name(name: &str) -> Option<PhpVersion> {
     PhpVersion::parse(version).ok()
 }
 
+/// Preflight: ensures `version`'s PHP-FPM socket is live in `dir`.
+///
+/// Must run before any state mutation so `spawn`/`update` never write a
+/// config whose `fastcgi_pass` targets a missing socket (`nginx -t` would
+/// accept it, but PHP requests would return 502).
+///
+/// # Arguments
+///
+/// * `version` - Version the generated config will target.
+/// * `dir` - Directory holding PHP-FPM sockets, normally [`PHP_FPM_SOCKET_DIR`].
+///
+/// # Errors
+///
+/// Returns the message built by [`fpm_unavailable_message`] when the socket
+/// is missing (or is not a socket).
+pub fn ensure_fpm_available_in(version: PhpVersion, dir: &Path) -> Result<(), String> {
+    if version.is_fpm_available_in(dir) {
+        return Ok(());
+    }
+    let socket = version.fpm_socket_path_in(dir);
+    let installed = installed_fpm_versions(dir);
+    Err(fpm_unavailable_message(version, &socket, &installed))
+}
+
+/// [`ensure_fpm_available_in`] against [`PHP_FPM_SOCKET_DIR`].
+///
+/// # Arguments
+///
+/// * `version` - Version the generated config will target.
+///
+/// # Errors
+///
+/// Same as [`ensure_fpm_available_in`].
+pub fn ensure_fpm_available(version: PhpVersion) -> Result<(), String> {
+    ensure_fpm_available_in(version, Path::new(PHP_FPM_SOCKET_DIR))
+}
+
+/// Formats the "PHP-FPM not available" error (pure; no I/O).
+///
+/// # Arguments
+///
+/// * `version` - The unavailable version.
+/// * `socket` - Socket path that was expected.
+/// * `installed` - Versions with a live socket (see [`installed_fpm_versions`]).
+///
+/// # Returns
+///
+/// e.g. `PHP-FPM 8.5 is not available (socket /var/run/php/php8.5-fpm.sock
+/// not found; is php8.5-fpm installed and running?). Installed: 8.1, 8.3.`;
+/// `Installed: none.` when the list is empty.
+pub fn fpm_unavailable_message(
+    version: PhpVersion,
+    socket: &Path,
+    installed: &[PhpVersion],
+) -> String {
+    let list = if installed.is_empty() {
+        "none".to_string()
+    } else {
+        installed
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "PHP-FPM {version} is not available (socket {} not found; is php{version}-fpm installed and running?). Installed: {list}.",
+        socket.display()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,5 +501,57 @@ mod tests {
             "invalid PHP version 'abc': expected MAJOR.MINOR, e.g. 8.5"
         );
         assert_eq!(PhpVersion::parse_cli("8.3"), Ok(v(8, 3)));
+    }
+
+    #[test]
+    fn unavailable_message_lists_installed_versions() {
+        let msg = fpm_unavailable_message(
+            v(8, 5),
+            Path::new("/var/run/php/php8.5-fpm.sock"),
+            &[v(8, 1), v(8, 3)],
+        );
+        assert_eq!(
+            msg,
+            "PHP-FPM 8.5 is not available (socket /var/run/php/php8.5-fpm.sock not found; \
+             is php8.5-fpm installed and running?). Installed: 8.1, 8.3."
+        );
+    }
+
+    #[test]
+    fn unavailable_message_with_nothing_installed() {
+        let msg = fpm_unavailable_message(v(8, 5), Path::new("/s"), &[]);
+        assert!(msg.ends_with("Installed: none."), "{msg}");
+    }
+
+    #[test]
+    fn ensure_available_ok_when_socket_live() {
+        let dir = short_tempdir();
+        let _l = bind(&v(8, 5).fpm_socket_path_in(dir.path()));
+        assert_eq!(ensure_fpm_available_in(v(8, 5), dir.path()), Ok(()));
+    }
+
+    #[test]
+    fn ensure_available_err_names_socket_and_installed() {
+        let dir = short_tempdir();
+        let _l = bind(&v(8, 1).fpm_socket_path_in(dir.path()));
+        let err = ensure_fpm_available_in(v(8, 5), dir.path()).unwrap_err();
+        let socket = v(8, 5).fpm_socket_path_in(dir.path());
+        assert_eq!(err, fpm_unavailable_message(v(8, 5), &socket, &[v(8, 1)]));
+        assert!(err.contains(&socket.display().to_string()));
+    }
+
+    #[test]
+    fn ensure_available_err_for_missing_dir() {
+        let dir = TempDir::new().expect("tempdir");
+        let err = ensure_fpm_available_in(v(8, 5), &dir.path().join("nope")).unwrap_err();
+        assert!(err.ends_with("Installed: none."), "{err}");
+    }
+
+    #[test]
+    fn ensure_available_default_dir_matches_message_shape() {
+        // Host-independent: either the socket exists or the error names it.
+        if let Err(e) = ensure_fpm_available(v(8, 5)) {
+            assert!(e.contains("/var/run/php/php8.5-fpm.sock"), "{e}");
+        }
     }
 }

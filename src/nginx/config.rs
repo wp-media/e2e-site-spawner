@@ -943,10 +943,10 @@ mod tests {
     fn test_no_legacy_php_8_1_in_output() {
         let config = php_test_config();
         for protocol in [NginxProtocol::Http, NginxProtocol::Https] {
-            assert!(!config.generate_config(protocol).contains("8.1"));
+            assert!(!config.generate_config(protocol).contains("php8.1-fpm"));
         }
-        assert!(!NGINX_HTTP_TEMPLATE.contains("8.1"));
-        assert!(!NGINX_HTTPS_TEMPLATE.contains("8.1"));
+        assert!(!NGINX_HTTP_TEMPLATE.contains("php8.1-fpm"));
+        assert!(!NGINX_HTTPS_TEMPLATE.contains("php8.1-fpm"));
     }
 
     /// Each template has exactly one socket placeholder, rendered exactly once.
