@@ -22,6 +22,7 @@ CLI for provisioning and managing WordPress or static sites on the QA LNMP serve
 ### System requirements
 
 - Linux host with nginx, PHP-FPM, and systemd (the tool reloads nginx via `systemctl`).
+- PHP-FPM 8.5 is the default version: generated configs use the socket `/var/run/php/php8.5-fpm.sock`. `spawn` and `update --ssl` check this socket before changing anything and refuse to run (exit 1, listing the installed PHP-FPM versions) when it is missing.
 - Root or sudo privileges. All commands exit early if they are not executed by root.
 - `curl` and `tar` for downloading and unpacking WordPress.
 - `mysql`/`mariadb` server reachable at `localhost` (host constant can be changed) with a root account that can create databases and grant privileges.

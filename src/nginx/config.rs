@@ -10,6 +10,8 @@
 //! - Validating configuration settings and syntax
 //! - Generating new configuration files from templates
 //! - Supporting both HTTP and HTTPS protocols
+//! - Pointing PHP requests at the PHP-FPM socket of a chosen [`crate::utils::php::PhpVersion`]
+//!   (defaults to [`crate::constants::DEFAULT_PHP_VERSION`])
 //! - Path validation and security checks
 //!
 //! # Examples
@@ -23,7 +25,8 @@
 //!     "/var/www/sites".to_string(),
 //!     "/etc/nginx/conf.d".to_string(),
 //!     true, // Enable SSL
-//! );
+//! )
+//! .with_php_version("8.3".parse()?); // Optional; defaults to PHP 8.5
 //!
 //! // Validate the configuration
 //! config.validate()?;
@@ -34,6 +37,7 @@
 //! ```
 
 use crate::constants::{NGINX_HTTP_TEMPLATE, NGINX_HTTPS_TEMPLATE, SITES_SSL_PATH};
+use crate::utils::php::PhpVersion;
 use std::path::Path;
 use std::process::Command;
 
@@ -96,6 +100,7 @@ pub enum NginxProtocol {
 /// * `root` - The document root directory where site files are stored
 /// * `nginx_config_file_path` - Full path to the Nginx configuration file
 /// * `ssl_root` - Optional path to SSL certificates directory (only when SSL is enabled)
+/// * `php_version` - PHP-FPM version whose socket the generated config targets
 ///
 /// # Examples
 ///
@@ -141,6 +146,13 @@ pub struct NginxConfig {
     /// Structure: `{SITES_SSL_PATH}/{site_name}`
     /// Example: Some("/etc/nginx/ssl/example.com")
     pub ssl_root: Option<String>,
+
+    /// PHP-FPM version the generated config passes PHP requests to.
+    ///
+    /// Rendered as `fastcgi_pass unix:{PHP_FPM_SOCKET_DIR}/php{X.Y}-fpm.sock`.
+    /// [`NginxConfig::new`] sets it to [`PhpVersion::default_version`];
+    /// override with [`NginxConfig::with_php_version`].
+    pub php_version: PhpVersion,
 }
 
 impl NginxConfig {
@@ -166,6 +178,7 @@ impl NginxConfig {
     /// - Site root: `{sites_path}/{site_name}`
     /// - Nginx config: `{nginx_config}/{site_name}.conf`
     /// - SSL root (if enabled): `{SITES_SSL_PATH}/{site_name}`
+    /// - PHP version: [`PhpVersion::default_version`] (`8.5`)
     ///
     /// # Examples
     ///
@@ -198,7 +211,27 @@ impl NginxConfig {
             root,
             nginx_config_file_path,
             ssl_root,
+            php_version: PhpVersion::default_version(),
         }
+    }
+
+    /// Returns this config targeting the PHP-FPM socket of `php_version`.
+    ///
+    /// Builder-style so callers that don't care keep the default from
+    /// [`NginxConfig::new`]. Does not check that the socket exists; callers
+    /// do that before mutating state (see [`PhpVersion::is_fpm_available`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `php_version` - Version used for the `!{{php_fpm_socket}}!` placeholder.
+    ///
+    /// # Returns
+    ///
+    /// `self` with `php_version` replaced.
+    #[must_use]
+    pub fn with_php_version(mut self, php_version: PhpVersion) -> Self {
+        self.php_version = php_version;
+        self
     }
 
     /// Validates the Nginx configuration settings.
@@ -362,7 +395,9 @@ impl NginxConfig {
     ///
     /// Available placeholders:
     /// - `!{{site_name}}!` - Replaced with the site's domain name
-    /// - `!{{site_path}}!` - Replaced with the site's root directory path  
+    /// - `!{{site_path}}!` - Replaced with the site's root directory path
+    /// - `!{{php_fpm_socket}}!` - Replaced with [`PhpVersion::fpm_socket_path`]
+    ///   of `php_version` (e.g. `/var/run/php/php8.5-fpm.sock`)
     /// - `!{{ssl_path}}!` - Replaced with the SSL certificate directory path (HTTPS only)
     ///
     /// # Panics
@@ -417,6 +452,9 @@ impl NginxConfig {
 
         // Replace site_path placeholder with the root path
         config = config.replace("!{{site_path}}!", &self.root);
+
+        // Point PHP requests at the selected PHP-FPM version's socket
+        config = config.replace("!{{php_fpm_socket}}!", &self.php_version.fpm_socket_path());
 
         // Replace ssl_path placeholder (only present in HTTPS template)
         if protocol == NginxProtocol::Https
@@ -812,6 +850,7 @@ mod tests {
             root: "/var/www/html/../etc/passwd".to_string(),
             nginx_config_file_path: "/etc/nginx/conf.d/../etc/passwd.conf".to_string(),
             ssl_root: None,
+            php_version: PhpVersion::default_version(),
         };
 
         let result = config_path_traversal.validate();
@@ -825,6 +864,7 @@ mod tests {
             root: "/var/www/html/test/com".to_string(),
             nginx_config_file_path: "/etc/nginx/conf.d/test/com.conf".to_string(),
             ssl_root: None,
+            php_version: PhpVersion::default_version(),
         };
 
         let result = config_with_slash.validate();
@@ -838,11 +878,130 @@ mod tests {
             root: "/var/www/html/invalid".to_string(),
             nginx_config_file_path: "/etc/nginx/conf.d/invalid.conf".to_string(),
             ssl_root: None,
+            php_version: PhpVersion::default_version(),
         };
 
         let result = config_invalid_domain.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid site name"));
+    }
+
+    /// Builds an SSL-enabled config for the PHP placeholder tests.
+    fn php_test_config() -> NginxConfig {
+        NginxConfig::new(
+            "php.example.com".to_string(),
+            "/var/www/html".to_string(),
+            "/etc/nginx/conf.d".to_string(),
+            true,
+        )
+    }
+
+    /// Parses a version literal for tests.
+    fn php(v: &str) -> PhpVersion {
+        PhpVersion::parse(v).expect("valid test version")
+    }
+
+    /// `new` defaults to PHP 8.5, matching `DEFAULT_PHP_VERSION`.
+    #[test]
+    fn test_new_defaults_to_php_8_5() {
+        let config = php_test_config();
+        assert_eq!(config.php_version, php("8.5"));
+        assert_eq!(
+            config.php_version.to_string(),
+            crate::constants::DEFAULT_PHP_VERSION
+        );
+    }
+
+    /// Both templates render the 8.5 socket by default.
+    #[test]
+    fn test_generate_config_default_php_socket() {
+        let config = php_test_config();
+        for protocol in [NginxProtocol::Http, NginxProtocol::Https] {
+            let out = config.generate_config(protocol);
+            assert!(
+                out.contains("fastcgi_pass unix:/var/run/php/php8.5-fpm.sock;"),
+                "{protocol:?} output lacks the 8.5 socket"
+            );
+            assert!(!out.contains("!{{php_fpm_socket}}!"));
+        }
+    }
+
+    /// `with_php_version` switches the socket in both templates.
+    #[test]
+    fn test_with_php_version_changes_socket() {
+        let config = php_test_config().with_php_version(php("8.3"));
+        assert_eq!(config.php_version, php("8.3"));
+        for protocol in [NginxProtocol::Http, NginxProtocol::Https] {
+            let out = config.generate_config(protocol);
+            assert!(out.contains("fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;"));
+            assert!(!out.contains("php8.5-fpm.sock"));
+        }
+    }
+
+    /// The legacy hard-coded 8.1 version is gone from generated output.
+    #[test]
+    fn test_no_legacy_php_8_1_in_output() {
+        let config = php_test_config();
+        for protocol in [NginxProtocol::Http, NginxProtocol::Https] {
+            assert!(!config.generate_config(protocol).contains("php8.1-fpm"));
+        }
+        assert!(!NGINX_HTTP_TEMPLATE.contains("php8.1-fpm"));
+        assert!(!NGINX_HTTPS_TEMPLATE.contains("php8.1-fpm"));
+    }
+
+    /// Each template has exactly one socket placeholder, rendered exactly once.
+    #[test]
+    fn test_php_socket_placeholder_rendered_once() {
+        assert_eq!(
+            NGINX_HTTP_TEMPLATE.matches("!{{php_fpm_socket}}!").count(),
+            1
+        );
+        assert_eq!(
+            NGINX_HTTPS_TEMPLATE.matches("!{{php_fpm_socket}}!").count(),
+            1
+        );
+        let config = php_test_config().with_php_version(php("7.4"));
+        for protocol in [NginxProtocol::Http, NginxProtocol::Https] {
+            let out = config.generate_config(protocol);
+            assert_eq!(out.matches("php7.4-fpm.sock").count(), 1);
+            assert_eq!(out.matches("fastcgi_pass").count(), 1);
+        }
+    }
+
+    /// Two-digit parts render verbatim, and the last `with_php_version` wins.
+    #[test]
+    fn test_with_php_version_edge_cases() {
+        let config = php_test_config()
+            .with_php_version(php("8.3"))
+            .with_php_version(php("10.12"));
+        let out = config.generate_config(NginxProtocol::Http);
+        assert!(out.contains("unix:/var/run/php/php10.12-fpm.sock;"));
+        assert!(!out.contains("php8.3-fpm.sock"));
+    }
+
+    /// The socket in output equals `PhpVersion::fpm_socket_path` (single source of truth).
+    #[test]
+    fn test_php_socket_matches_fpm_socket_path() {
+        let config = php_test_config();
+        let out = config.generate_config(NginxProtocol::Https);
+        assert!(out.contains(&format!("unix:{};", config.php_version.fpm_socket_path())));
+    }
+
+    /// Changing the PHP version does not touch the other fields.
+    #[test]
+    fn test_with_php_version_preserves_other_fields() {
+        let base = php_test_config();
+        let (name, root, path, ssl) = (
+            base.site_name.clone(),
+            base.root.clone(),
+            base.nginx_config_file_path.clone(),
+            base.ssl_root.clone(),
+        );
+        let changed = base.with_php_version(php("8.2"));
+        assert_eq!(changed.site_name, name);
+        assert_eq!(changed.root, root);
+        assert_eq!(changed.nginx_config_file_path, path);
+        assert_eq!(changed.ssl_root, ssl);
     }
 
     /// Tests NginxProtocol Debug and Clone traits
@@ -1027,6 +1186,7 @@ mod validation_tests {
             root: "/nonexistent/path/test.com".to_string(),
             nginx_config_file_path: "/also/nonexistent/test.com.conf".to_string(),
             ssl_root: Some("/ssl/nonexistent/test.com".to_string()),
+            php_version: PhpVersion::default_version(),
         };
 
         let result = config.validate_paths();
@@ -1051,6 +1211,7 @@ mod validation_tests {
             root: format!("{}/test.com", temp_file.to_str().unwrap()),
             nginx_config_file_path: "/etc/nginx/conf.d/test.com.conf".to_string(),
             ssl_root: None,
+            php_version: PhpVersion::default_version(),
         };
 
         let result = config.validate_paths();

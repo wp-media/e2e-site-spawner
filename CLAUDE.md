@@ -41,7 +41,7 @@ src/
 ├── main.rs                  # Entry point: clap dispatch + privilege gate
 ├── constants.rs             # All paths, DB settings, templates, markers
 ├── assets/                  # Templates embedded at compile time (include_str!)
-│   ├── http.conf.template   #   placeholders: !{{site_name}}!, !{{site_path}}!
+│   ├── http.conf.template   #   placeholders: !{{site_name}}!, !{{site_path}}!, !{{php_fpm_socket}}!
 │   ├── https.conf.template  #   + !{{ssl_path}}!
 │   └── default-index.html   #   static-site landing page (--no-wp)
 ├── cli/

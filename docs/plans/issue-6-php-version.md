@@ -100,6 +100,8 @@ The order is PHP → WP → SSL so that the HTTPS block appended last uses the n
   - The three struct-literal tests in `config.rs` (`test_validate_invalid_site_names`, `test_validate_paths_nonexistent`, `test_validate_paths_file_not_directory`) need a `php_version` field only so they compile. Their assertions stay unchanged, and the commit message explains this, as your testing rules require.
 - **DoD:** suite green. New spawns, even without a flag, get 8.5.
 - **Commit:** `feat(nginx): template the PHP-FPM socket and default to PHP 8.5`
+- **Interim guard (follow-up fix):** `spawn` and `update --ssl` now run `utils::php::ensure_fpm_available` for the config's version (the default until P3) right before any mutation, and exit 1 with the missing socket path and installed versions. This keeps develop from silently writing configs for a missing socket. P3 (`spawn --php`) and P4 (`update --php`) reuse and extend this same preflight instead of adding a new one.
+- **Follow-up commit:** `fix(spawn,update): refuse to write configs for a missing PHP-FPM socket`
 
 ### P2.2 — Detect / rewrite PHP version in existing configs
 - **Depends:** P1 · **Parallel with:** P0, P2.1, P3
