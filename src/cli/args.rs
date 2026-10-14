@@ -17,7 +17,7 @@
 //! - `delete` - Remove sites and all associated resources
 //! - `deactivate` - Temporarily disable site access
 //! - `activate` - Re-enable deactivated sites
-//! - `update` - Add WordPress and/or SSL to an existing site
+//! - `update` - Switch the PHP-FPM version, add WordPress and/or SSL to an existing site
 //! - `list` - Show every site configured on the server
 
 use clap::builder::styling::{AnsiColor, Effects, Styles};
@@ -102,7 +102,8 @@ const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\n", env!("CARGO_PKG_A
 /// #### `update`
 /// Modifies an existing managed site:
 /// - **Required**: Site name to update
-/// - **Options**: `--wp` (install WordPress), `--ssl` (add HTTPS)
+/// - **Options**: `--wp` (install WordPress), `--ssl` (add HTTPS, keeping the
+///   site's PHP version), `--php <VERSION>` (switch PHP-FPM version; no default)
 ///
 /// #### `list`
 /// Shows every configured site with its status, SSL, WordPress and path.
@@ -122,6 +123,9 @@ const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\n", env!("CARGO_PKG_A
 ///
 /// # Create a WordPress site served by PHP-FPM 8.3
 /// e2sp spawn example.com --php 8.3
+///
+/// # Switch an existing site to PHP-FPM 8.5
+/// e2sp update example.com --php 8.5
 ///
 /// # Delete a site
 /// e2sp delete example.com
@@ -231,11 +235,13 @@ pub fn build_cli() -> Command {
         .subcommand(
             Command::new("update")
                 .about("Modifies an existing site's configuration")
-                .long_about("Updates an existing site by adding WordPress and/or SSL support")
+                .long_about("Updates an existing site: switches its PHP-FPM version, adds WordPress and/or adds SSL. Steps run in that order; --ssl keeps the site's PHP version (or the --php target)")
                 .after_help("EXAMPLES:\n    \
                     e2sp update example.e2e.rocketlabsqa.ovh --wp       # Add WordPress to a static site\n    \
                     e2sp update example.e2e.rocketlabsqa.ovh --ssl      # Add SSL certificate to HTTP-only site\n    \
-                    e2sp update example.e2e.rocketlabsqa.ovh --wp --ssl # Add both WordPress and SSL")
+                    e2sp update example.e2e.rocketlabsqa.ovh --wp --ssl # Add both WordPress and SSL\n    \
+                    e2sp update example.e2e.rocketlabsqa.ovh --php 8.5  # Switch the site to PHP-FPM 8.5\n    \
+                    e2sp update example.e2e.rocketlabsqa.ovh --php 8.5 --ssl # Switch to 8.5, then add SSL on 8.5")
                 .arg(
                     Arg::new("site_name")
                         .help("The name of the site to update (e.g., example.e2e.rocketlabsqa.ovh)")
@@ -252,8 +258,15 @@ pub fn build_cli() -> Command {
                 .arg(
                     Arg::new("ssl")
                         .long("ssl")
-                        .help("Add SSL certificate to an HTTP-only site")
+                        .help("Add SSL certificate to an HTTP-only site (the HTTPS block keeps the site's PHP version; refused if it cannot be detected, unless --php is given)")
                         .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("php")
+                        .long("php")
+                        .help("Switch the site's PHP-FPM version (X.Y); its socket must exist. Omit to keep the current version")
+                        .value_name("VERSION")
+                        .value_parser(PhpVersion::parse_cli),
                 ),
         )
         .subcommand(
@@ -396,11 +409,39 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
 
+    /// Returns the `--php` value of a successfully parsed `update` invocation.
+    fn update_php(args: &[&str]) -> Option<PhpVersion> {
+        let matches = parse(args).expect("update should parse");
+        let update = matches
+            .subcommand_matches("update")
+            .expect("update subcommand");
+        update.get_one::<PhpVersion>("php").copied()
+    }
+
     #[test]
-    fn test_php_flag_is_not_accepted_by_update_yet() {
-        // `update --php` arrives in P4; until then the flag is spawn-only.
-        let err = parse(&["update", "x.com", "--php", "8.3"]).expect_err("unknown flag");
-        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    fn test_update_php_has_no_default() {
+        assert_eq!(update_php(&["update", "x.com", "--ssl"]), None);
+    }
+
+    #[test]
+    fn test_update_php_accepts_version_with_other_flags() {
+        let php = update_php(&["update", "x.com", "--wp", "--ssl", "--php=8.3"]);
+        assert_eq!(php.map(|v| v.to_string()).as_deref(), Some("8.3"));
+    }
+
+    #[test]
+    fn test_update_php_rejects_invalid_values() {
+        for bad in ["abc", "8", "8.5.1", "v8.5", "8.5/../x", ""] {
+            let err = parse(&["update", "x.com", "--php", bad]).expect_err(bad);
+            assert_eq!(err.kind(), ErrorKind::ValueValidation, "{bad}");
+        }
+    }
+
+    #[test]
+    fn test_update_php_rejects_repeated_flag() {
+        let err =
+            parse(&["update", "x.com", "--php", "8.3", "--php", "8.4"]).expect_err("repeated flag");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]

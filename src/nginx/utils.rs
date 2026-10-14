@@ -408,6 +408,25 @@ pub fn overwrite_nginx_file(path: &str, content: &str) -> Result<(), FileCreatio
     result
 }
 
+/// Checks that `path` is an existing regular file (not a symlink), without
+/// following symlinks.
+///
+/// Lets callers reject a config up front that [`overwrite_nginx_file`] would
+/// later refuse to restore, before mutating anything. [`append_to_nginx_file`]
+/// is deliberately left unchanged.
+///
+/// # Arguments
+///
+/// * `path` - The file to check.
+///
+/// # Errors
+///
+/// `FileWriteFailed` when the file is missing/unreadable, `InvalidPath` when
+/// it is a symlink or not a regular file.
+pub fn ensure_regular_nginx_file(path: &str) -> Result<(), FileCreationError> {
+    existing_regular_file_metadata(Path::new(path), path).map(|_| ())
+}
+
 /// Returns the metadata of `file_path` without following symlinks, requiring
 /// an existing regular file.
 ///
@@ -1719,6 +1738,32 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "server { listen 81; }");
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o640);
+    }
+
+    /// A regular file passes; a symlink (even to a regular file), a directory
+    /// and a missing path are rejected.
+    #[test]
+    fn test_ensure_regular_nginx_file() {
+        let dir = tmp_dir();
+        let file = dir.path().join("site.conf");
+        fs::write(&file, "server {}").unwrap();
+        let link = dir.path().join("link.conf");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let file_str = file.to_str().unwrap();
+        assert!(ensure_regular_nginx_file(file_str).is_ok());
+        assert!(matches!(
+            ensure_regular_nginx_file(link.to_str().unwrap()),
+            Err(FileCreationError::InvalidPath(_))
+        ));
+        assert!(matches!(
+            ensure_regular_nginx_file(dir.path().to_str().unwrap()),
+            Err(FileCreationError::InvalidPath(_))
+        ));
+        let missing = dir.path().join("missing.conf");
+        assert!(matches!(
+            ensure_regular_nginx_file(missing.to_str().unwrap()),
+            Err(FileCreationError::FileWriteFailed(_))
+        ));
     }
 
     /// A missing file is reported and never created.

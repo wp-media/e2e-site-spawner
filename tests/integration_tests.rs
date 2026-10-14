@@ -402,6 +402,114 @@ mod tests {
         }
     }
 
+    // ===== update --php =====
+
+    #[test]
+    fn test_update_php_invalid_value_rejected_before_privilege_gate() {
+        let mut cmd = cmd!();
+        cmd.args(["update", TEST_DOMAIN, "--php", "bad"]);
+        cmd.assert()
+            .failure()
+            .code(2)
+            .stderr(predicate::str::contains("invalid value 'bad'"));
+    }
+
+    #[test]
+    fn test_update_php_patch_version_rejected() {
+        let mut cmd = cmd!();
+        cmd.args(["update", TEST_DOMAIN, "--php", "8.5.1"]);
+        cmd.assert().failure().code(2);
+    }
+
+    #[test]
+    fn test_update_php_missing_value_rejected() {
+        let mut cmd = cmd!();
+        cmd.args(["update", TEST_DOMAIN, "--php"]);
+        cmd.assert().failure().code(2);
+    }
+
+    #[test]
+    fn test_update_help_documents_php_flag_without_default() {
+        let mut cmd = cmd!();
+        cmd.args(["update", "--help"]);
+        cmd.assert()
+            .success()
+            .stdout(predicate::str::contains("--php <VERSION>"))
+            .stdout(predicate::str::contains("--php 8.5"))
+            .stdout(predicate::str::contains("[default:").not());
+    }
+
+    #[test]
+    fn test_update_valid_php_reaches_privilege_gate() {
+        if is_running_as_root() {
+            return; // Covered by the #[ignore]d root test below.
+        }
+        let mut cmd = cmd!();
+        cmd.args(["update", TEST_DOMAIN, "--php", "8.3"]);
+        cmd.assert()
+            .failure()
+            .code(1)
+            .stdout(predicate::str::contains("ELEVATED PRIVILEGES REQUIRED"));
+    }
+
+    /// Spawns a static qa9 site on PHP-FPM 8.1 (legacy-style), switches it to
+    /// 8.5 with `update --php 8.5`, then checks `update --php 9.9` fails without
+    /// touching the file. Run manually as root on a disposable QA VM with
+    /// php8.1-fpm and php8.5-fpm: `sudo cargo test -- --ignored
+    /// test_update_php_as_root`. With a socket missing, the matching preflight
+    /// error is asserted instead. Only ever touches qa9, and refuses to run if
+    /// qa9 already exists.
+    #[test]
+    #[ignore]
+    fn test_update_php_as_root() {
+        const DOMAIN: &str = "qa9.e2e.rocketlabsqa.ovh";
+        let conf = format!("/etc/nginx/conf.d/{DOMAIN}.conf");
+        for path in [
+            conf.clone(),
+            format!("{conf}.deactivated"),
+            format!("/var/www/html/{DOMAIN}"),
+        ] {
+            assert!(
+                !std::path::Path::new(&path).exists(),
+                "{path} already exists; remove the qa9 site before running this test"
+            );
+        }
+        let spawned = cmd!()
+            .args(["spawn", DOMAIN, "--no-wp", "--php", "8.1"])
+            .output()
+            .unwrap();
+        if !spawned.status.success() {
+            let stderr = String::from_utf8_lossy(&spawned.stderr);
+            assert!(stderr.contains("PHP-FPM 8.1 is not available"), "{stderr}");
+            return;
+        }
+        let _cleanup = DeleteSiteGuard(DOMAIN);
+
+        let before = std::fs::read_to_string(&conf).unwrap();
+        let switched = cmd!()
+            .args(["update", DOMAIN, "--php", "8.5"])
+            .output()
+            .unwrap();
+        let after = std::fs::read_to_string(&conf).unwrap();
+        if switched.status.success() {
+            assert!(after.contains("php8.5-fpm.sock"));
+            assert!(!after.contains("php8.1-fpm.sock"));
+        } else {
+            let stderr = String::from_utf8_lossy(&switched.stderr);
+            assert!(stderr.contains("PHP-FPM 8.5 is not available"), "{stderr}");
+            assert_eq!(after, before);
+        }
+
+        let unavailable = cmd!()
+            .args(["update", DOMAIN, "--php", "9.9"])
+            .output()
+            .unwrap();
+        assert_eq!(unavailable.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&unavailable.stderr);
+        assert!(stderr.contains("PHP-FPM 9.9 is not available"), "{stderr}");
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), after);
+    }
+
     // ===== Helper Functions =====
 
     /// Check if running as root (same logic as main.rs)
