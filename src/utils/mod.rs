@@ -16,3 +16,6 @@ pub mod ssl;
 
 /// Input validation helpers (site names, paths, etc.).
 pub mod validators;
+
+/// PHP version parsing and PHP-FPM socket discovery.
+pub mod php;
